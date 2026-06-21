@@ -9,9 +9,15 @@
   box-sizing: border-box;
 }
 
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 320px;
+}
+
 body {
   margin: 0;
-  min-width: 320px;
   min-height: 100vh;
 }
 
@@ -22,6 +28,8 @@ button {
 .appShell {
   display: grid;
   grid-template-columns: 248px minmax(0, 1fr);
+  width: 100%;
+  min-width: 0;
   min-height: 100vh;
 }
 
@@ -92,11 +100,17 @@ button {
 .content {
   display: grid;
   align-content: start;
+  grid-template-columns: minmax(0, 1fr);
   gap: 20px;
   width: 100%;
   min-width: 0;
   padding: 28px;
   justify-self: stretch;
+}
+
+.content > * {
+  width: 100%;
+  min-width: 0;
 }
 
 .accountBar {
