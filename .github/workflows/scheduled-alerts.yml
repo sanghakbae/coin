@@ -20,6 +20,7 @@ jobs:
       KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
       KAKAO_CLIENT_SECRET: ${{ secrets.KAKAO_CLIENT_SECRET }}
       KAKAO_REFRESH_TOKEN: ${{ secrets.KAKAO_REFRESH_TOKEN }}
+      WATCHLIST_SYMBOLS: ${{ secrets.WATCHLIST_SYMBOLS }}
       SITE_URL: https://coin.sanghak.kr
 
     steps:

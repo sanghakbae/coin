@@ -113,6 +113,11 @@ async function fetchWatchSymbols(db) {
     }),
   );
 
+  for (const row of (process.env.WATCHLIST_SYMBOLS || "").split(",")) {
+    const symbol = normalizeBinanceSymbol(row);
+    if (symbol) symbols.add(symbol);
+  }
+
   return symbols;
 }
 
