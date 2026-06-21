@@ -24,6 +24,7 @@ export interface SignalRecord {
   bollingerPosition?: number | null;
   volumeRatio: number | null;
   candles?: number[];
+  candleTimes?: number[];
   newsScore?: number;
   newsArticleCount?: number;
   components?: Record<string, number>;

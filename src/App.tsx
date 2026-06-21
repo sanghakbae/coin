@@ -1,25 +1,25 @@
 import { useEffect, useMemo, useState } from "react";
-import { Activity, Bell, CandlestickChart, CircleAlert, LogIn, LogOut, Plus, Radio, Settings, Trash2 } from "lucide-react";
+import { CandlestickChart, LogIn, LogOut, Plus, Radio, Settings, Trash2 } from "lucide-react";
 import { GoogleAuthProvider, User, onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
-import { collection, doc, limit, onSnapshot, orderBy, query, serverTimestamp, setDoc } from "firebase/firestore";
-import { auth, db, hasFirebaseConfig } from "./firebase";
-import type { SignalRecord, WatchItem } from "./types";
+import { collection, doc, onSnapshot, serverTimestamp, setDoc } from "firebase/firestore";
+import { auth, db } from "./firebase";
+import type { SignalRecord } from "./types";
 
-const demoWatchlist: WatchItem[] = [
-  {
-    id: "btcusdt",
-    symbol: "BTCUSDT",
-    timeframe: "15m / 1h / 4h",
-    enabled: true,
-    exchange: "binance",
-    rsiBuy: 30,
-    rsiSell: 70,
-    volumeSpike: 1.8,
-  },
-];
 const WATCHLIST_STORAGE_KEY = "coin-signal-watchlist";
+const CHART_RANGES = [
+  { label: "1주", value: "7d", days: 7 },
+  { label: "1개월", value: "1m", days: 30 },
+  { label: "3개월", value: "3m", days: 90 },
+  { label: "6개월", value: "6m", days: 180 },
+  { label: "1년", value: "1y", days: 365 },
+] as const;
+const LIVE_BUY_THRESHOLD = 32;
+const LIVE_SELL_THRESHOLD = -32;
+
+type ChartRange = (typeof CHART_RANGES)[number]["value"];
 
 interface BinanceCandle {
+  openTime: number;
   close: number;
   high: number;
   low: number;
@@ -57,19 +57,19 @@ const EXCLUDED_ASSETS = new Set([
   "WSTETH",
 ]);
 
-function formatTime(signal: SignalRecord) {
-  if (!signal.createdAt) return "대기 중";
-  return new Intl.DateTimeFormat("ko-KR", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(signal.createdAt.seconds * 1000));
-}
-
 function formatNumber(value: number | null, digits = 2) {
   if (value === null || Number.isNaN(value)) return "-";
   return value.toLocaleString("ko-KR", { maximumFractionDigits: digits });
+}
+
+function formatPercent(value: number | null) {
+  if (value === null || Number.isNaN(value)) return "-";
+  return `${value >= 0 ? "+" : ""}${formatNumber(value)}%`;
+}
+
+function formatKrw(value: number | null) {
+  if (value === null || Number.isNaN(value)) return "-";
+  return `${Math.round(value).toLocaleString("ko-KR")}원`;
 }
 
 function displaySymbol(symbol: string) {
@@ -85,6 +85,17 @@ function normalizeWatchSymbol(value: string) {
 function average(values: number[]) {
   if (values.length === 0) return 0;
   return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function calculateSma(values: number[], period: number) {
+  if (values.length < period) return null;
+  return average(values.slice(-period));
+}
+
+function nearestFibLevel(position: number | null) {
+  if (position === null) return null;
+  const levels = [0, 23.6, 38.2, 50, 61.8, 78.6, 100];
+  return levels.reduce((nearest, level) => (Math.abs(level - position) < Math.abs(nearest - position) ? level : nearest), levels[0]);
 }
 
 function calculateRsi(closes: number[], period = 14) {
@@ -125,24 +136,30 @@ function calculateEma(values: number[], period: number) {
 
 function buildLiveSignal(coin: MarketCoin, timeframe: string, candles: BinanceCandle[]): SignalRecord {
   const closes = candles.map((candle) => candle.close);
+  const times = candles.map((candle) => candle.openTime);
   const volumes = candles.map((candle) => candle.volume);
   const price = closes[closes.length - 1] ?? 0;
   const previous = closes[closes.length - 2] ?? price;
   const rsi = calculateRsi(closes);
   const ema50 = calculateEma(closes, 50);
   const ema200 = calculateEma(closes, 200);
+  const sma20w = calculateSma(closes, 140);
+  const yearlyHigh = Math.max(...candles.map((candle) => candle.high));
+  const yearlyLow = Math.min(...candles.map((candle) => candle.low));
+  const fibPosition = yearlyHigh > yearlyLow ? ((price - yearlyLow) / (yearlyHigh - yearlyLow)) * 100 : null;
+  const fibNearest = nearestFibLevel(fibPosition);
   const recentAverageVolume = average(volumes.slice(-21, -1));
   const volumeRatio = recentAverageVolume > 0 ? (volumes[volumes.length - 1] ?? 0) / recentAverageVolume : null;
   const trendScore = ema50 !== null && ema200 !== null ? (price > ema50 && ema50 > ema200 ? 18 : price < ema50 && ema50 < ema200 ? -18 : 0) : 0;
   const rsiScore = rsi === null ? 0 : rsi <= 30 ? 14 : rsi >= 70 ? -14 : rsi > 50 ? 6 : -6;
   const volumeScore = volumeRatio !== null && volumeRatio >= 1.5 ? (price >= previous ? 8 : -8) : 0;
   const score = Math.round(trendScore + rsiScore + volumeScore);
-  const direction = score >= 22 ? "buy" : score <= -22 ? "sell" : "neutral";
+  const direction = score >= LIVE_BUY_THRESHOLD ? "buy" : score <= LIVE_SELL_THRESHOLD ? "sell" : "neutral";
   const reason =
     direction === "buy"
       ? `브라우저 실시간 계산: 상승 우위, RSI ${formatNumber(rsi)}, 거래량 ${formatNumber(volumeRatio)}x`
       : direction === "sell"
-        ? `브라우저 실시간 계산: 하락 경계, RSI ${formatNumber(rsi)}, 거래량 ${formatNumber(volumeRatio)}x`
+        ? `브라우저 실시간 계산: 하락 주의, RSI ${formatNumber(rsi)}, 거래량 ${formatNumber(volumeRatio)}x`
         : `브라우저 실시간 계산: 중립, RSI ${formatNumber(rsi)}, 거래량 ${formatNumber(volumeRatio)}x`;
 
   return {
@@ -162,7 +179,15 @@ function buildLiveSignal(coin: MarketCoin, timeframe: string, candles: BinanceCa
     ema50,
     ema200,
     volumeRatio,
-    candles: closes.slice(-72),
+    candles: closes.slice(-365),
+    candleTimes: times.slice(-365),
+    components: {
+      sma20w: sma20w ?? 0,
+      fibPosition: fibPosition ?? 0,
+      fibNearest: fibNearest ?? 0,
+      yearlyHigh,
+      yearlyLow,
+    },
     newsScore: 0,
     newsArticleCount: 0,
     createdAt: {
@@ -217,16 +242,17 @@ async function fetchTopMarketCapCoins() {
     .filter((coin) => !EXCLUDED_ASSETS.has(coin.symbol));
 }
 
-async function fetchLiveSignal(coin: MarketCoin, timeframe = "1h") {
+async function fetchLiveSignal(coin: MarketCoin, timeframe = "1d") {
   const url = new URL("https://api.binance.com/api/v3/klines");
   url.searchParams.set("symbol", coin.binanceSymbol);
   url.searchParams.set("interval", timeframe);
-  url.searchParams.set("limit", "220");
+  url.searchParams.set("limit", "365");
 
   const response = await fetch(url);
   if (!response.ok) throw new Error(`Binance request failed: ${response.status}`);
   const rows = (await response.json()) as Array<[number, string, string, string, string, string]>;
   const candles = rows.map((row) => ({
+    openTime: Number(row[0]),
     high: Number(row[2]),
     low: Number(row[3]),
     close: Number(row[4]),
@@ -259,7 +285,7 @@ async function fetchLiveTopSignals() {
 
   return signals
     .filter(Boolean)
-    .sort((left, right) => Math.abs(right.score ?? 0) - Math.abs(left.score ?? 0));
+    .sort((left, right) => (left.marketCapRank ?? 999) - (right.marketCapRank ?? 999));
 }
 
 function chartPath(values: number[], width: number, height: number, padding = 8) {
@@ -279,14 +305,98 @@ function chartPath(values: number[], width: number, height: number, padding = 8)
     .join(" ");
 }
 
-function Sparkline({ values, direction, large = false }: { values?: number[]; direction: string; large?: boolean }) {
-  const width = large ? 720 : 160;
-  const height = large ? 220 : 54;
-  const path = chartPath(values ?? [], width, height, large ? 16 : 6);
-  const color = direction === "buy" ? "#0f8b72" : direction === "sell" ? "#df5b50" : "#607084";
+function monthMarkers(times: number[] | undefined, width: number, padding: number) {
+  if (!times || times.length < 2) return [];
+  const usableWidth = width - padding * 2;
+
+  return times
+    .map((time, index) => {
+      const date = new Date(time);
+      const previous = index > 0 ? new Date(times[index - 1]) : null;
+      if (index === 0 || !previous || date.getMonth() === previous.getMonth()) return null;
+      return {
+        x: padding + (index / (times.length - 1)) * usableWidth,
+        label: `${date.getMonth() + 1}월`,
+      };
+    })
+    .filter((marker): marker is { x: number; label: string } => marker !== null);
+}
+
+function yearChange(values?: number[]) {
   const first = values?.[0] ?? null;
   const last = values?.[values.length - 1] ?? null;
-  const change = first && last ? ((last - first) / first) * 100 : null;
+  return first && last ? ((last - first) / first) * 100 : null;
+}
+
+function dayChange(values?: number[]) {
+  if (!values || values.length < 2) return null;
+  const last = values[values.length - 1];
+  const previous = values[values.length - 2];
+  return previous ? ((last - previous) / previous) * 100 : null;
+}
+
+function rangeDays(range: ChartRange) {
+  return CHART_RANGES.find((item) => item.value === range)?.days ?? 365;
+}
+
+function sliceByRange<T>(values: T[] | undefined, range: ChartRange) {
+  return values?.slice(-rangeDays(range));
+}
+
+function indicatorText(signal: SignalRecord) {
+  const sma20w = signal.components?.sma20w ?? null;
+  const fibNearest = signal.components?.fibNearest ?? null;
+  const maState = sma20w && signal.price >= sma20w ? "20주선 위" : sma20w ? "20주선 아래" : "20주선 대기";
+  const fibText = fibNearest !== null ? `피보 ${formatNumber(fibNearest, 1)}%` : "피보 대기";
+  const volumeText = signal.volumeRatio !== null ? `거래량 평균의 ${formatNumber(signal.volumeRatio)}배` : "거래량 대기";
+  const newsText =
+    signal.newsArticleCount && signal.newsArticleCount > 0
+      ? `뉴스 ${formatNumber(signal.newsScore ?? 0, 0)} / ${signal.newsArticleCount}건`
+      : "뉴스 대기";
+  return {
+    maState,
+    fibText,
+    volumeText,
+    newsText,
+    rsiText: signal.rsi !== null ? `RSI ${formatNumber(signal.rsi)}` : "RSI 대기",
+  };
+}
+
+function buyReason(signal: SignalRecord) {
+  const sma20w = signal.components?.sma20w ?? null;
+  const fibNearest = signal.components?.fibNearest ?? null;
+  const reasons = [];
+
+  if (sma20w) {
+    reasons.push(signal.price >= sma20w ? `현재가가 20주 평균선(${formatNumber(sma20w, 4)} USDT) 위` : "현재가가 20주 평균선 아래");
+  }
+
+  if (signal.rsi !== null) {
+    if (signal.rsi < 30) reasons.push(`RSI ${formatNumber(signal.rsi)} 과매도`);
+    else if (signal.rsi < 70) reasons.push(`RSI ${formatNumber(signal.rsi)} 과열 전`);
+    else reasons.push(`RSI ${formatNumber(signal.rsi)} 과열 주의`);
+  }
+
+  if (fibNearest !== null) {
+    reasons.push(`1년 고저점 기준 피보나치 ${formatNumber(fibNearest, 1)}% 부근`);
+  }
+
+  if (signal.volumeRatio !== null) {
+    reasons.push(`거래량은 최근 평균의 ${formatNumber(signal.volumeRatio)}배`);
+  }
+
+  return reasons.join(" · ");
+}
+
+function Sparkline({ values, times, large = false }: { values?: number[]; times?: number[]; large?: boolean }) {
+  const width = large ? 960 : 280;
+  const height = large ? 240 : 64;
+  const padding = large ? 18 : 7;
+  const path = chartPath(values ?? [], width, height, padding);
+  const last = values?.[values.length - 1] ?? null;
+  const change = yearChange(values);
+  const color = change !== null && change >= 0 ? "#0f8b72" : "#df5b50";
+  const markers = monthMarkers(times, width, padding);
 
   return (
     <div className={large ? "chartBox large" : "chartBox mini"}>
@@ -294,15 +404,25 @@ function Sparkline({ values, direction, large = false }: { values?: number[]; di
         <div className="chartHeader">
           <div>
             <strong>{last ? `${formatNumber(last, 4)} USDT` : "-"}</strong>
-            <span>최근 72개 1시간봉</span>
+            <span>선택 기간 일봉 · 월 표시</span>
           </div>
-          <b className={change !== null && change >= 0 ? "positive" : "negative"}>{change !== null ? `${change >= 0 ? "+" : ""}${formatNumber(change)}%` : "-"}</b>
+          <b className={change !== null && change >= 0 ? "positive" : "negative"}>{formatPercent(change)}</b>
         </div>
       )}
       {path ? (
         <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="가격 추세 그래프" preserveAspectRatio="none">
           <path className="chartGrid" d={`M 0 ${height - 1} L ${width} ${height - 1}`} />
-          <path d={path} fill="none" stroke={color} strokeWidth={large ? 3 : 2.2} strokeLinecap="round" strokeLinejoin="round" />
+          {markers.map((marker) => (
+            <g key={`${marker.label}-${marker.x}`}>
+              <path className="chartMonthLine" d={`M ${marker.x.toFixed(2)} 0 L ${marker.x.toFixed(2)} ${height}`} />
+              {large && (
+                <text className="chartMonthLabel" x={marker.x + 4} y={14}>
+                  {marker.label}
+                </text>
+              )}
+            </g>
+          ))}
+          <path d={path} fill="none" stroke={color} strokeWidth={large ? 3 : 2.1} strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       ) : (
         <div className="chartEmpty">차트 대기</div>
@@ -316,8 +436,11 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
-  const [activeView, setActiveView] = useState<"signals" | "alerts" | "settings">("signals");
+  const [usdKrw, setUsdKrw] = useState<number | null>(null);
+  const [activeView, setActiveView] = useState<"markets" | "settings">("markets");
   const [coinInput, setCoinInput] = useState("");
+  const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
+  const [chartRange, setChartRange] = useState<ChartRange>("1y");
   const [watchSymbols, setWatchSymbols] = useState<string[]>(() => {
     try {
       const saved = window.localStorage.getItem(WATCHLIST_STORAGE_KEY);
@@ -326,29 +449,9 @@ export default function App() {
       return [];
     }
   });
-  const latest = signals[0];
-  const watchlist = useMemo<WatchItem[]>(
-    () =>
-      (watchSymbols.length ? watchSymbols : signals.slice(0, 5).map((signal) => signal.symbol)).map((symbol) => ({
-            id: symbol,
-            symbol,
-            timeframe: signals.find((signal) => signal.symbol === symbol)?.timeframe ?? "1h",
-            enabled: true,
-            exchange: "binance",
-            rsiBuy: 30,
-            rsiSell: 70,
-            volumeSpike: 1.8,
-          })),
-    [signals, watchSymbols],
-  );
-  const filteredWatchlist = watchlist.length ? watchlist : demoWatchlist;
-  const recentSignals = useMemo(
-    () =>
-      watchSymbols.length
-        ? [...signals.filter((signal) => watchSymbols.includes(signal.symbol)), ...signals.filter((signal) => !watchSymbols.includes(signal.symbol))]
-        : signals,
-    [signals, watchSymbols],
-  );
+  const latest = useMemo(() => signals.find((signal) => signal.symbol === selectedSymbol) ?? signals[0], [selectedSymbol, signals]);
+  const buySignals = useMemo(() => signals.filter((signal) => signal.direction === "buy"), [signals]);
+  const sellSignals = useMemo(() => signals.filter((signal) => signal.direction === "sell"), [signals]);
 
   useEffect(() => {
     if (!auth) return undefined;
@@ -384,13 +487,35 @@ export default function App() {
   }, [user]);
 
   useEffect(() => {
-    let hasFirestoreSignals = false;
     let active = true;
 
-    async function loadLiveFallback() {
+    async function loadExchangeRate() {
+      try {
+        const response = await fetch("https://open.er-api.com/v6/latest/USD");
+        if (!response.ok) throw new Error(`exchange rate failed: ${response.status}`);
+        const data = (await response.json()) as { rates?: { KRW?: number } };
+        if (active && data.rates?.KRW) setUsdKrw(data.rates.KRW);
+      } catch {
+        if (active) setUsdKrw(null);
+      }
+    }
+
+    loadExchangeRate();
+    const timer = window.setInterval(loadExchangeRate, 30 * 60_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let hasServerSignals = false;
+    let active = true;
+
+    async function loadLivePrices() {
       try {
         const liveSignals = await fetchLiveTopSignals();
-        if (active && !hasFirestoreSignals) {
+        if (active && !hasServerSignals) {
           setSignals(liveSignals);
           setLiveError(null);
         }
@@ -399,49 +524,32 @@ export default function App() {
       }
     }
 
-    loadLiveFallback();
-    const timer = window.setInterval(loadLiveFallback, 60_000);
+    loadLivePrices();
+    const timer = window.setInterval(loadLivePrices, 60_000);
+    const unsubscribe = db
+      ? onSnapshot(collection(db, "signals"), (snapshot) => {
+          const serverSignals = snapshot.docs
+            .map((item) => ({
+              id: item.id,
+              ...(item.data() as Omit<SignalRecord, "id">),
+            }))
+            .filter((signal) => Array.isArray(signal.candles) && signal.candles.length > 1)
+            .sort((left, right) => (left.marketCapRank ?? 999) - (right.marketCapRank ?? 999));
 
-    if (!db) {
-      return () => {
-        active = false;
-        window.clearInterval(timer);
-      };
-    }
-
-    const signalQuery = query(collection(db, "signals"), orderBy("createdAt", "desc"), limit(20));
-    const unsubscribe = onSnapshot(
-      signalQuery,
-      (snapshot) => {
-        hasFirestoreSignals = snapshot.docs.length > 0;
-        if (hasFirestoreSignals) {
-          setSignals(
-            snapshot.docs.map((doc) => ({
-              id: doc.id,
-              ...(doc.data() as Omit<SignalRecord, "id">),
-            })),
-          );
-        }
-      },
-      () => {
-        hasFirestoreSignals = false;
-        loadLiveFallback();
-      },
-    );
+          hasServerSignals = serverSignals.length > 0;
+          if (active && hasServerSignals) {
+            setSignals(serverSignals);
+            setLiveError(null);
+          }
+        })
+      : undefined;
 
     return () => {
       active = false;
       window.clearInterval(timer);
-      unsubscribe();
+      unsubscribe?.();
     };
   }, []);
-
-  const status = useMemo(() => {
-    if (!latest) return { label: "신호 대기", className: "neutral" };
-    if (latest.direction === "buy") return { label: "매수 관심", className: "buy" };
-    if (latest.direction === "sell") return { label: "매도 경계", className: "sell" };
-    return { label: "중립", className: "neutral" };
-  }, [latest]);
 
   async function handleGoogleLogin() {
     if (!auth) return;
@@ -486,17 +594,14 @@ export default function App() {
 
   function removeWatchSymbol(symbol: string) {
     void saveWatchSymbols(watchSymbols.filter((item) => item !== symbol));
+    if (selectedSymbol === symbol) setSelectedSymbol(null);
   }
 
   const navButtons = (
     <>
-      <button className={activeView === "signals" ? "active" : ""} type="button" title="실시간 신호" onClick={() => setActiveView("signals")}>
+      <button className={activeView === "markets" ? "active" : ""} type="button" title="Top 50" onClick={() => setActiveView("markets")}>
         <Radio size={18} />
-        <span>실시간 신호</span>
-      </button>
-      <button className={activeView === "alerts" ? "active" : ""} type="button" title="알림 내역" onClick={() => setActiveView("alerts")}>
-        <Bell size={18} />
-        <span>알림 내역</span>
+        <span>Top 50</span>
       </button>
       <button className={activeView === "settings" ? "active" : ""} type="button" title="설정" onClick={() => setActiveView("settings")}>
         <Settings size={18} />
@@ -564,12 +669,10 @@ export default function App() {
 
         <header className="topbar">
           <div>
-            <h1>암호화폐 매매 신호</h1>
-            <p>시총 상위 50개 중 Binance USDT 현물 거래쌍을 스캔하고, 지표와 뉴스 점수를 합산해 카카오톡 알림을 보냅니다.</p>
+            <h1>Top 50 현재가</h1>
           </div>
-          <div className={`signalBadge ${status.className}`}>
-            <Activity size={18} />
-            <span>{status.label}</span>
+          <div className="signalBadge neutral">
+            <span>{signals.length ? `${signals.length}개` : "로딩 중"}</span>
           </div>
         </header>
 
@@ -594,7 +697,7 @@ export default function App() {
             </form>
             <div className="coinChipList">
               {watchSymbols.length === 0 ? (
-                <p className="helperText">관심 코인을 추가하면 대시보드의 관심 코인 영역과 최근 신호 우선순위에 반영됩니다.</p>
+              <p className="helperText">관심 코인을 추가하면 설정에 저장됩니다.</p>
               ) : (
                 watchSymbols.map((symbol) => (
                   <span className="coinChip" key={symbol}>
@@ -607,7 +710,7 @@ export default function App() {
               )}
             </div>
             <div className="suggestions">
-              <strong>현재 신호에서 빠르게 추가</strong>
+              <strong>Top 50에서 빠르게 추가</strong>
               <div>
                 {signals.slice(0, 12).map((signal) => (
                   <button type="button" key={signal.symbol} onClick={() => addWatchSymbol(signal.symbol)}>
@@ -619,109 +722,150 @@ export default function App() {
           </section>
         ) : (
           <>
-            {activeView === "signals" && (
+            {activeView === "markets" && (
               <>
-                <section className="metricGrid" aria-label="최신 지표">
-                  <article className="metric">
-                    <span>가격</span>
-                    <strong>{latest ? `${formatNumber(latest.price, 4)} USDT` : "-"}</strong>
-                  </article>
-                  <article className="metric">
-                    <span>RSI</span>
-                    <strong>{latest ? formatNumber(latest.rsi) : "-"}</strong>
-                  </article>
-                  <article className="metric">
-                    <span>점수</span>
-                    <strong>{latest ? formatNumber(latest.score ?? 0, 0) : "-"}</strong>
-                  </article>
-                  <article className="metric">
-                    <span>뉴스</span>
-                    <strong>{latest ? `${formatNumber(latest.newsScore ?? 0, 0)} / ${latest.newsArticleCount ?? 0}건` : "-"}</strong>
-                  </article>
-                </section>
-
-                {latest && (
-                  <section className="panel chartPanel" aria-label="대표 코인 가격 그래프">
-                    <div className="panelHeader">
-                      <h2>{displaySymbol(latest.symbol)} 가격 추세</h2>
-                      <span>{latest.timeframe}</span>
-                    </div>
-                    <Sparkline values={latest.candles} direction={latest.direction} large />
-                  </section>
-                )}
-              </>
-            )}
-
-            <section className="workspace">
-              {activeView === "signals" && (
-                <div className="panel">
+                <section className="panel watchPanel">
                   <div className="panelHeader">
                     <h2>관심 코인</h2>
-                    <span>{filteredWatchlist.length}개</span>
+                    <span>{watchSymbols.length}개</span>
                   </div>
-                  <div className="watchList">
-                    {filteredWatchlist.map((item) => (
-                      <article className="watchItem" key={item.id}>
-                        <div>
-                          <strong>{displaySymbol(item.symbol)}</strong>
-                          <span>{item.exchange.toUpperCase()} · {item.timeframe}</span>
-                        </div>
-                        <dl>
-                          <div>
-                            <dt>RSI 매수</dt>
-                            <dd>{item.rsiBuy}</dd>
-                          </div>
-                          <div>
-                            <dt>RSI 매도</dt>
-                            <dd>{item.rsiSell}</dd>
-                          </div>
-                          <div>
-                            <dt>거래량</dt>
-                            <dd>{item.volumeSpike}x</dd>
-                          </div>
-                        </dl>
-                      </article>
-                    ))}
+                  <div className="watchQuickList">
+                    {watchSymbols.length === 0 ? (
+                      <p>설정에서 BTC, ETH, SOL처럼 관심 코인을 추가하세요.</p>
+                    ) : (
+                      watchSymbols.map((symbol) => (
+                        <button
+                          className={latest?.symbol === symbol ? "active" : ""}
+                          key={symbol}
+                          type="button"
+                          onClick={() => setSelectedSymbol(symbol)}
+                        >
+                          {displaySymbol(symbol)}
+                        </button>
+                      ))
+                    )}
                   </div>
-                </div>
-              )}
+                </section>
 
-              <div className="panel">
-                <div className="panelHeader">
-                  <h2>{activeView === "alerts" ? "알림 내역" : "최근 신호"}</h2>
-                  <span>{recentSignals.length}건</span>
-                </div>
+                <section className="panel buyPanel" aria-label="매수 신호 코인">
+                  <div className="panelHeader">
+                    <h2>매수 신호</h2>
+                    <span>{buySignals.length}개</span>
+                  </div>
+                  {buySignals.length === 0 ? (
+                    <div className="emptyState">
+                      <p>현재 조건에 맞는 매수 신호가 없습니다.</p>
+                    </div>
+                  ) : (
+                    <div className="buySignalList">
+                      {buySignals.map((signal) => (
+                        <button className="buySignalCard" key={signal.id} type="button" onClick={() => setSelectedSymbol(signal.symbol)}>
+                          <div>
+                            <span>#{signal.marketCapRank ?? "-"}</span>
+                            <strong>{displaySymbol(signal.symbol)}</strong>
+                            <small>{signal.coinName ?? signal.asset}</small>
+                          </div>
+                          <strong className="priceStack">
+                            <span>{formatNumber(signal.price, 4)} USDT</span>
+                            <small>{usdKrw ? formatKrw(signal.price * usdKrw) : "환율 대기"}</small>
+                          </strong>
+                          <span>{indicatorText(signal).rsiText}</span>
+                          <span>{indicatorText(signal).maState}</span>
+                          <span>{indicatorText(signal).fibText}</span>
+                          <span>{indicatorText(signal).volumeText}</span>
+                          <span>{indicatorText(signal).newsText}</span>
+                          <p>{buyReason(signal)}</p>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </section>
 
-                {recentSignals.length === 0 ? (
-                  <div className="emptyState">
-                    <CircleAlert size={22} />
-                    <p>
-                      {liveError
-                        ? `Binance 실시간 데이터 오류: ${liveError}`
-                        : hasFirebaseConfig
-                          ? "Binance 실시간 데이터를 불러오는 중입니다."
-                          : ".env.local에 Firebase 웹앱 설정을 입력하면 Firestore 신호를 구독합니다."}
-                    </p>
+                <section className="panel sellPanel" aria-label="하락 위험 코인">
+                  <div className="panelHeader">
+                    <h2>하락 위험</h2>
+                    <span>{sellSignals.length}개</span>
                   </div>
-                ) : (
-                  <div className="signalList">
-                    {recentSignals.map((signal) => (
-                      <article className={`signalRow ${signal.direction}`} key={signal.id}>
-                        <div>
-                          <strong>{displaySymbol(signal.symbol)} {signal.score !== undefined ? `· ${signal.score}` : ""}</strong>
-                          <span>{signal.reason}</span>
-                        </div>
-                        <Sparkline values={signal.candles} direction={signal.direction} />
-                        <div className="signalMeta">
-                          <span>{signal.timeframe}</span>
-                          <time>{formatTime(signal)}</time>
-                        </div>
-                      </article>
-                    ))}
+                  {sellSignals.length === 0 ? (
+                    <div className="emptyState">
+                      <p>현재 강한 하락 위험 신호가 없습니다.</p>
+                    </div>
+                  ) : (
+                    <div className="buySignalList">
+                      {sellSignals.map((signal) => (
+                        <button className="buySignalCard sellSignalCard" key={signal.id} type="button" onClick={() => setSelectedSymbol(signal.symbol)}>
+                          <div>
+                            <span>#{signal.marketCapRank ?? "-"}</span>
+                            <strong>{displaySymbol(signal.symbol)}</strong>
+                            <small>{signal.coinName ?? signal.asset}</small>
+                          </div>
+                          <strong className="priceStack">
+                            <span>{formatNumber(signal.price, 4)} USDT</span>
+                            <small>{usdKrw ? formatKrw(signal.price * usdKrw) : "환율 대기"}</small>
+                          </strong>
+                          <span>{indicatorText(signal).rsiText}</span>
+                          <span>{indicatorText(signal).maState}</span>
+                          <span>{indicatorText(signal).fibText}</span>
+                          <span>{indicatorText(signal).volumeText}</span>
+                          <span>{indicatorText(signal).newsText}</span>
+                          <p>{signal.reason}</p>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </section>
+
+                <section className="panel marketPanel">
+                  <div className="panelHeader">
+                    <h2>시총 Top 50</h2>
+                    <div className="rangeControls" aria-label="그래프 기간">
+                      {CHART_RANGES.map((range) => (
+                        <button className={chartRange === range.value ? "active" : ""} key={range.value} type="button" onClick={() => setChartRange(range.value)}>
+                          {range.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                )}
-              </div>
-            </section>
+                  {signals.length === 0 ? (
+                    <div className="emptyState">
+                      <p>{liveError ? `Binance 실시간 데이터 오류: ${liveError}` : "Binance 가격 데이터를 불러오는 중입니다."}</p>
+                    </div>
+                  ) : (
+                    <div className="marketList">
+                      {signals.map((signal) => (
+                      <button
+                        className={`marketRow ${signal.direction === "buy" ? "buySignal" : ""} ${latest?.symbol === signal.symbol ? "active" : ""}`}
+                        key={signal.id}
+                        type="button"
+                        onClick={() => setSelectedSymbol(signal.symbol)}
+                      >
+                        <div className="marketAsset">
+                          <span>#{signal.marketCapRank ?? "-"}</span>
+                          <strong>{displaySymbol(signal.symbol)}</strong>
+                          <small>{signal.coinName ?? signal.asset}{watchSymbols.includes(signal.symbol) ? " · 관심" : ""}</small>
+                        </div>
+                        <strong className="marketPrice priceStack">
+                          <span>{formatNumber(signal.price, 4)} USDT</span>
+                          <small>{usdKrw ? formatKrw(signal.price * usdKrw) : "환율 대기"}</small>
+                        </strong>
+                        <span className={dayChange(signal.candles) !== null && dayChange(signal.candles)! >= 0 ? "marketChange positiveText" : "marketChange negativeText"}>
+                          {formatPercent(dayChange(signal.candles))}
+                        </span>
+                        <div className="marketIndicators">
+                          <span>{indicatorText(signal).rsiText}</span>
+                          <span>{indicatorText(signal).maState}</span>
+                          <span>{indicatorText(signal).fibText}</span>
+                          <span>{indicatorText(signal).volumeText}</span>
+                          <span>{indicatorText(signal).newsText}</span>
+                        </div>
+                        <Sparkline values={sliceByRange(signal.candles, chartRange)} times={sliceByRange(signal.candleTimes, chartRange)} />
+                      </button>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              </>
+            )}
           </>
         )}
       </section>

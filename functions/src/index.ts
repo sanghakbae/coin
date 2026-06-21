@@ -1,14 +1,15 @@
 import { initializeApp } from "firebase-admin/app";
 import { FieldValue, getFirestore } from "firebase-admin/firestore";
-import { defineSecret } from "firebase-functions/params";
+import { defineSecret, defineString } from "firebase-functions/params";
 import { logger } from "firebase-functions";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 
 initializeApp();
 
 const kakaoRestApiKey = defineSecret("KAKAO_REST_API_KEY");
+const kakaoClientSecret = defineSecret("KAKAO_CLIENT_SECRET");
 const kakaoRefreshToken = defineSecret("KAKAO_REFRESH_TOKEN");
-const siteUrl = defineSecret("SITE_URL");
+const siteUrl = defineString("SITE_URL", { default: "https://coin.sanghak.kr" });
 
 type Direction = "buy" | "sell" | "neutral";
 
@@ -64,27 +65,37 @@ interface Signal {
   bollingerPosition: number | null;
   volumeRatio: number | null;
   obvSlope: number | null;
+  candles: number[];
+  candleTimes: number[];
   newsScore: number;
   newsArticleCount: number;
   components: Record<string, number>;
   createdAt?: FirebaseFirestore.FieldValue;
 }
 
-const TIMEFRAMES = ["15m", "1h", "4h"];
+const TIMEFRAMES = ["1d"];
 const TOP_MARKET_CAP_LIMIT = 50;
-const CANDLE_LIMIT = 240;
-const BUY_THRESHOLD = 42;
-const SELL_THRESHOLD = -42;
-const MAX_ALERTS_PER_RUN = 5;
+const CANDLE_LIMIT = 365;
+const BUY_THRESHOLD = 50;
+const SELL_THRESHOLD = -50;
+const MAX_ALERTS_PER_RUN = 8;
 const SCAN_CONCURRENCY = 5;
 const EXCLUDED_ASSETS = new Set([
   "USDT",
   "USDC",
+  "USDS",
   "DAI",
   "FDUSD",
   "TUSD",
   "USDE",
   "USDD",
+  "USDP",
+  "PYUSD",
+  "USD1",
+  "GUSD",
+  "FRAX",
+  "LUSD",
+  "SUSD",
   "BUSD",
   "WBTC",
   "WETH",
@@ -96,7 +107,7 @@ export const scanCoinSignals = onSchedule(
   {
     schedule: "every 15 minutes",
     timeZone: "Asia/Seoul",
-    secrets: [kakaoRestApiKey, kakaoRefreshToken, siteUrl],
+    secrets: [kakaoRestApiKey, kakaoClientSecret, kakaoRefreshToken],
     timeoutSeconds: 300,
     memory: "512MiB",
   },
@@ -146,12 +157,17 @@ export const scanCoinSignals = onSchedule(
 
     await batch.commit();
 
-    const actionable = ranked
-      .filter((signal) => signal.direction !== "neutral")
-      .slice(0, MAX_ALERTS_PER_RUN);
+    const actionable = ranked.filter((signal) => signal.direction !== "neutral").slice(0, MAX_ALERTS_PER_RUN);
 
     for (const signal of actionable) {
       await notifyOnDirectionChange(signal);
+    }
+
+    const actionableKeys = new Set(actionable.map((signal) => `${signal.symbol}_${signal.timeframe}`));
+    for (const signal of ranked) {
+      if (!actionableKeys.has(`${signal.symbol}_${signal.timeframe}`)) {
+        await updateCurrentDirection(signal);
+      }
     }
   },
 );
@@ -367,6 +383,8 @@ function calculateSignal(coin: MarketCoin, timeframe: string, candles: Candle[],
     bollingerPosition: bollinger?.position ?? null,
     volumeRatio,
     obvSlope,
+    candles: closes.slice(-365),
+    candleTimes: candles.map((candle) => candle.openTime).slice(-365),
     newsScore: news.score,
     newsArticleCount: news.articleCount,
     components,
@@ -377,28 +395,73 @@ async function notifyOnDirectionChange(signal: Signal) {
   const db = getFirestore();
   const stateRef = db.collection("state").doc(`${signal.symbol}_${signal.timeframe}`);
   const state = await stateRef.get();
-  const lastDirection = state.exists ? state.data()?.lastDirection : undefined;
-  const lastScore = state.exists ? Number(state.data()?.lastScore ?? 0) : 0;
+  const stateData = state.exists ? state.data() : undefined;
+  const previousDirection = stateData?.currentDirection;
+  const lastNotifiedDirection = stateData?.lastNotifiedDirection;
+  const lastNotifiedScore = Number(stateData?.lastNotifiedScore ?? 0);
 
-  if (lastDirection === signal.direction && Math.abs(signal.score - lastScore) < 15) {
+  if (
+    previousDirection === signal.direction &&
+    lastNotifiedDirection === signal.direction &&
+    Math.abs(signal.score - lastNotifiedScore) < 15
+  ) {
     logger.info("Signal already notified", { symbol: signal.symbol, timeframe: signal.timeframe });
+    await updateCurrentDirection(signal);
     return;
   }
 
   await sendKakaoMemo(signal);
-  await stateRef.set({
-    lastDirection: signal.direction,
-    lastScore: signal.score,
-    lastReason: signal.reason,
-    lastPrice: signal.price,
-    updatedAt: FieldValue.serverTimestamp(),
+  await db.collection("alertHistory").add({
+    symbol: signal.symbol,
+    asset: signal.asset,
+    coinName: signal.coinName,
+    marketCapRank: signal.marketCapRank,
+    timeframe: signal.timeframe,
+    direction: signal.direction,
+    score: signal.score,
+    reason: signal.reason,
+    price: signal.price,
+    createdAt: FieldValue.serverTimestamp(),
   });
+  await stateRef.set(
+    {
+      currentDirection: signal.direction,
+      currentScore: signal.score,
+      currentReason: signal.reason,
+      currentPrice: signal.price,
+      lastNotifiedDirection: signal.direction,
+      lastNotifiedScore: signal.score,
+      lastNotifiedReason: signal.reason,
+      lastNotifiedPrice: signal.price,
+      lastNotifiedAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    },
+    { merge: true },
+  );
+}
+
+async function updateCurrentDirection(signal: Signal) {
+  const db = getFirestore();
+  await db
+    .collection("state")
+    .doc(`${signal.symbol}_${signal.timeframe}`)
+    .set(
+      {
+        currentDirection: signal.direction,
+        currentScore: signal.score,
+        currentReason: signal.reason,
+        currentPrice: signal.price,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
 }
 
 async function sendKakaoMemo(signal: Signal) {
   const accessToken = await refreshKakaoAccessToken();
-  const label = signal.direction === "buy" ? "매수 관심" : "매도 경계";
-  const message = `[${label}] ${signal.symbol} ${signal.timeframe}
+  const asset = signal.symbol.endsWith("USDT") ? signal.symbol.slice(0, -4) : signal.symbol;
+  const label = signal.direction === "buy" ? "매수 신호" : "하락 위험";
+  const message = `[${label}] ${asset} ${signal.timeframe}
 점수: ${signal.score}
 가격: ${signal.price.toLocaleString("ko-KR", { maximumFractionDigits: 6 })} USDT
 시총 순위: #${signal.marketCapRank}
@@ -436,6 +499,7 @@ async function refreshKakaoAccessToken() {
     body: new URLSearchParams({
       grant_type: "refresh_token",
       client_id: kakaoRestApiKey.value(),
+      client_secret: kakaoClientSecret.value(),
       refresh_token: kakaoRefreshToken.value(),
     }),
   });

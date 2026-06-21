@@ -2,21 +2,21 @@
 
 React + Vite + Firebase 기반 개인용 암호화폐 신호 알림 프로젝트입니다.
 
-기본 구조는 `Cloud Scheduler -> Firebase Functions -> Firestore -> React`입니다. Functions는 CoinGecko 시가총액 상위 50개 코인을 기준으로 Binance USDT 현물 거래쌍을 선별하고, Binance 캔들 데이터와 GDELT 뉴스 제목을 함께 점수화합니다. 강한 매수/매도 신호가 새로 잡히면 카카오톡 "나에게 보내기" API로 알림을 보냅니다.
+기본 구조는 `Cloud Scheduler -> Firebase Functions -> Firestore -> React`입니다. Functions는 CoinGecko 시가총액 상위 50개 코인을 기준으로 Binance USDT 현물 거래쌍을 선별하고, Binance 일봉 캔들 데이터와 GDELT 뉴스 제목을 함께 점수화합니다. 강한 매수 신호나 하락 위험 신호가 새로 잡히면 카카오톡 "나에게 보내기" API로 알림을 보냅니다.
 
 ## 포함된 것
 
 - React/Vite 실시간 대시보드
-- Firestore `signals` 컬렉션 구독
+- Binance 실시간 가격/차트 기반 Top 50 화면
 - Firebase Functions 스케줄러 `scanCoinSignals`
 - CoinGecko 시총 상위 50 후보 선정
 - Binance USDT 현물 캔들 수집
-- `15m`, `1h`, `4h` 멀티 타임프레임 스캔
+- `1d` 일봉 기준 자동 스캔
 - EMA 50/200, MACD, RSI, Stochastic, CCI, Bollinger, ATR, OBV, 거래량 급증 점수
 - GDELT 공개 뉴스 제목 기반 간이 감성 점수
 - 카카오 access token 자동 갱신 후 "나에게 보내기"
 - 중복 알림 방지용 `/state/{symbol_timeframe}`
-- Firebase Hosting/Functions/Firestore 배포용 GitHub Actions
+- GitHub Pages 프론트 배포 + Firebase Functions/Firestore 배포용 GitHub Actions
 
 ## 로컬 설정
 
@@ -39,11 +39,11 @@ Functions 배포 전에 아래 secrets를 등록합니다.
 
 ```bash
 firebase functions:secrets:set KAKAO_REST_API_KEY
+firebase functions:secrets:set KAKAO_CLIENT_SECRET
 firebase functions:secrets:set KAKAO_REFRESH_TOKEN
-firebase functions:secrets:set SITE_URL
 ```
 
-`SITE_URL`은 Firebase Hosting 또는 연결한 DNS 주소입니다.
+`SITE_URL`은 기본값이 `https://coin.sanghak.kr`입니다. 다른 주소로 쓸 때만 GitHub Actions 또는 Firebase deploy 환경변수로 바꾸면 됩니다.
 
 ## 카카오 토큰 준비
 
@@ -62,6 +62,7 @@ Functions가 아래 컬렉션을 씁니다.
 /signals/{symbol_timeframe}
 /scanRuns/{autoId}
 /state/{symbol_timeframe}
+/alertHistory/{autoId}
 ```
 
 현재 보안 규칙은 `signals` 읽기만 공개하고 모든 쓰기는 차단합니다. 운영 시 로그인 사용자만 읽도록 바꿀 수 있습니다.
@@ -72,7 +73,7 @@ GitHub Actions 배포에 아래 값을 등록합니다.
 
 ```text
 FIREBASE_PROJECT_ID
-FIREBASE_SERVICE_ACCOUNT
+FIREBASE_SERVICE_ACCOUNT_COIN_F1318
 VITE_FIREBASE_API_KEY
 VITE_FIREBASE_AUTH_DOMAIN
 VITE_FIREBASE_PROJECT_ID
@@ -80,23 +81,15 @@ VITE_FIREBASE_STORAGE_BUCKET
 VITE_FIREBASE_MESSAGING_SENDER_ID
 VITE_FIREBASE_APP_ID
 VITE_FIREBASE_MEASUREMENT_ID
-DEPLOY_FUNCTIONS
 ```
 
-`FIREBASE_SERVICE_ACCOUNT`는 Firebase Hosting과 Firestore Rules 배포 권한이 있는 서비스 계정 JSON입니다. 이 값이 없으면 GitHub Actions는 빌드까지만 수행하고 배포 step은 건너뜁니다. `DEPLOY_FUNCTIONS`는 기본값을 `false`로 두고, Firebase 프로젝트를 Blaze 요금제로 전환하고 Kakao secrets를 등록한 뒤 `true`로 바꾸세요.
+`FIREBASE_SERVICE_ACCOUNT_COIN_F1318`는 Firebase Functions와 Firestore Rules 배포 권한이 있는 서비스 계정 JSON입니다. 이 값이 없으면 GitHub Actions는 프론트 빌드와 GitHub Pages 배포만 수행합니다.
 
-GitHub Actions는 `main` 브랜치 push 또는 수동 실행으로 Firebase Hosting과 Firestore Rules를 배포합니다.
+GitHub Actions는 `main` 브랜치 push 또는 수동 실행으로 GitHub Pages를 배포하고, 서비스 계정 secret이 있으면 Firebase Functions와 Firestore Rules도 같이 배포합니다.
 
 ## Custom domain
 
-Firebase Hosting custom domain으로 `coin.sanghak.kr`을 등록했습니다. Cloudflare DNS에서 아래 레코드를 반영해야 도메인과 인증서 발급이 완료됩니다.
-
-```text
-coin.sanghak.kr CNAME coin-f1318.web.app
-_acme-challenge.coin.sanghak.kr TXT gX8shVmP_7RKD5ePdM3xe-Xfk34L4TcmorCJJjGadVo
-```
-
-현재 `coin.sanghak.kr`은 `sanghakbae.github.io`로 향하고 있으므로 기존 CNAME을 제거하고 위 CNAME으로 교체해야 합니다.
+현재 프론트는 GitHub Pages에서 `coin.sanghak.kr`로 배포합니다. `public/CNAME`에 커스텀 도메인이 들어 있으며, GitHub Pages 설정에서 Source는 GitHub Actions입니다.
 
 ## 기본 신호 조건
 
@@ -105,11 +98,11 @@ _acme-challenge.coin.sanghak.kr TXT gX8shVmP_7RKD5ePdM3xe-Xfk34L4TcmorCJJjGadVo
 ```text
 market universe: CoinGecko market cap top 50
 exchange: Binance spot USDT pairs
-timeframes: 15m, 1h, 4h
+timeframes: 1d
 schedule: every 15 minutes
-buy threshold: score >= 42
-sell threshold: score <= -42
-max alerts per run: 5
+buy threshold: score >= 50
+sell threshold: score <= -50
+max alerts per run: 8
 ```
 
 신호 점수는 추세, MACD, RSI, Stochastic, CCI, Bollinger, 거래량, OBV, 뉴스 점수를 합산합니다. 이 값들은 백테스트 결과에 맞춰 조정하는 편이 좋습니다.
@@ -117,6 +110,6 @@ max alerts per run: 5
 ## 운영 메모
 
 - CoinGecko 무료 API는 호출 제한이 있으므로 15분 주기 정도로 시작하는 것을 권장합니다.
-- Binance 캔들은 심볼당 타임프레임별로 호출합니다. 상위 50개와 3개 타임프레임이면 한 번에 최대 150개 캔들 요청이 발생합니다.
+- Binance 캔들은 심볼당 1년치 일봉 365개를 호출합니다.
 - GDELT 뉴스 점수는 빠른 MVP용입니다. 더 정확한 뉴스 분석이 필요하면 CryptoPanic, NewsAPI, 자체 FinBERT/LLM 분류 파이프라인으로 교체하세요.
 - 이 시스템은 자동 매매가 아니라 신호 알림용입니다. 실제 주문 전에는 백테스트, 페이퍼 트레이딩, 손절/포지션 크기 규칙이 필요합니다.
