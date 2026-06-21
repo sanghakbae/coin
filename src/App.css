@@ -93,9 +93,10 @@ button {
   display: grid;
   align-content: start;
   gap: 20px;
-  width: min(100%, 1480px);
+  width: 100%;
+  min-width: 0;
   padding: 28px;
-  justify-self: center;
+  justify-self: stretch;
 }
 
 .accountBar {
@@ -234,6 +235,7 @@ h1 {
   display: grid;
   grid-template-columns: repeat(4, minmax(140px, 1fr));
   gap: 12px;
+  min-width: 0;
 }
 
 .metric,
@@ -265,6 +267,7 @@ h1 {
   display: grid;
   grid-template-columns: minmax(280px, 0.75fr) minmax(360px, 1.25fr);
   gap: 16px;
+  min-width: 0;
 }
 
 .panel {
