@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { Activity, Bell, CandlestickChart, CircleAlert, Radio, Settings } from "lucide-react";
+import { Activity, Bell, CandlestickChart, CircleAlert, LogIn, LogOut, Radio, Settings } from "lucide-react";
+import { GoogleAuthProvider, User, onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
 import { collection, limit, onSnapshot, orderBy, query } from "firebase/firestore";
-import { db, hasFirebaseConfig } from "./firebase";
+import { auth, db, hasFirebaseConfig } from "./firebase";
 import type { SignalRecord, WatchItem } from "./types";
 
 const demoWatchlist: WatchItem[] = [
@@ -35,7 +36,14 @@ function formatNumber(value: number | null, digits = 2) {
 export default function App() {
   const [signals, setSignals] = useState<SignalRecord[]>([]);
   const [watchlist] = useState<WatchItem[]>(demoWatchlist);
+  const [user, setUser] = useState<User | null>(null);
+  const [authBusy, setAuthBusy] = useState(false);
   const latest = signals[0];
+
+  useEffect(() => {
+    if (!auth) return undefined;
+    return onAuthStateChanged(auth, setUser);
+  }, []);
 
   useEffect(() => {
     if (!db) return undefined;
@@ -56,6 +64,28 @@ export default function App() {
     if (latest.direction === "sell") return { label: "매도 경계", className: "sell" };
     return { label: "중립", className: "neutral" };
   }, [latest]);
+
+  async function handleGoogleLogin() {
+    if (!auth) return;
+    setAuthBusy(true);
+    try {
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: "select_account" });
+      await signInWithPopup(auth, provider);
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function handleLogout() {
+    if (!auth) return;
+    setAuthBusy(true);
+    try {
+      await signOut(auth);
+    } finally {
+      setAuthBusy(false);
+    }
+  }
 
   return (
     <main className="appShell">
@@ -85,6 +115,27 @@ export default function App() {
       </aside>
 
       <section className="content">
+        <div className="accountBar">
+          {user ? (
+            <div className="userMenu">
+              {user.photoURL ? <img src={user.photoURL} alt="" /> : <span className="userInitial">{user.displayName?.[0] ?? "U"}</span>}
+              <div>
+                <strong>{user.displayName ?? "Google 사용자"}</strong>
+                <span>{user.email}</span>
+              </div>
+              <button type="button" onClick={handleLogout} disabled={authBusy} title="로그아웃">
+                <LogOut size={17} />
+                <span>로그아웃</span>
+              </button>
+            </div>
+          ) : (
+            <button className="loginButton" type="button" onClick={handleGoogleLogin} disabled={!auth || authBusy} title="Google 로그인">
+              <LogIn size={17} />
+              <span>Google 로그인</span>
+            </button>
+          )}
+        </div>
+
         <header className="topbar">
           <div>
             <h1>암호화폐 매매 신호</h1>

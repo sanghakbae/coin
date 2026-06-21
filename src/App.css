@@ -91,6 +91,87 @@ button {
   padding: 28px;
 }
 
+.accountBar {
+  display: flex;
+  justify-content: flex-end;
+  min-height: 42px;
+}
+
+.loginButton,
+.userMenu button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 13px;
+  border: 1px solid #cfd7df;
+  border-radius: 8px;
+  color: #18202a;
+  background: #ffffff;
+  cursor: pointer;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.loginButton:disabled,
+.userMenu button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.userMenu {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.userMenu img,
+.userInitial {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+}
+
+.userMenu img {
+  display: block;
+  object-fit: cover;
+}
+
+.userInitial {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  background: #0f8b72;
+  font-weight: 900;
+}
+
+.userMenu > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.userMenu strong,
+.userMenu span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.userMenu strong {
+  max-width: 180px;
+  font-size: 14px;
+}
+
+.userMenu span {
+  max-width: 220px;
+  color: #667383;
+  font-size: 12px;
+}
+
 .topbar {
   display: flex;
   align-items: flex-start;
@@ -330,6 +411,23 @@ h1 {
     padding: 20px 14px;
   }
 
+  .accountBar {
+    justify-content: stretch;
+  }
+
+  .loginButton,
+  .userMenu {
+    width: 100%;
+  }
+
+  .userMenu {
+    justify-content: space-between;
+  }
+
+  .userMenu > div {
+    flex: 1;
+  }
+
   .topbar,
   .signalRow {
     align-items: stretch;
@@ -356,6 +454,10 @@ h1 {
 
   .navList button {
     min-height: 40px;
+  }
+
+  .userMenu button span {
+    display: none;
   }
 
   .watchItem dl {
