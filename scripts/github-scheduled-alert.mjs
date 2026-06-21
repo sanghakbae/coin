@@ -12,6 +12,7 @@ const PUMP_ALERT_THRESHOLD = 10;
 const MAX_ALERTS_PER_RUN = 8;
 const SCAN_CONCURRENCY = 4;
 const SITE_URL = process.env.SITE_URL || "https://coin.sanghak.kr";
+const BINANCE_API_BASES = ["https://data-api.binance.vision", "https://api.binance.com", "https://api1.binance.com"];
 const EXCLUDED_ASSETS = new Set([
   "USDT",
   "USDC",
@@ -146,11 +147,7 @@ async function fetchTopMarketCapCoins() {
 }
 
 async function fetchBinanceTradingSymbols() {
-  const response = await fetch("https://api.binance.com/api/v3/exchangeInfo", {
-    headers: { accept: "application/json" },
-  });
-  if (!response.ok) throw new Error(`Binance exchangeInfo failed: ${response.status}`);
-  const data = await response.json();
+  const data = await fetchBinanceJson("/api/v3/exchangeInfo");
   return new Set(
     data.symbols
       .filter((symbol) => symbol.status === "TRADING" && symbol.quoteAsset === "USDT" && symbol.isSpotTradingAllowed)
@@ -164,9 +161,7 @@ async function fetchBinanceCandles(symbol, interval, limit) {
   url.searchParams.set("interval", interval);
   url.searchParams.set("limit", String(limit));
 
-  const response = await fetch(url, { headers: { accept: "application/json" } });
-  if (!response.ok) throw new Error(`Binance klines failed for ${symbol}: ${response.status}`);
-  const rows = await response.json();
+  const rows = await fetchBinanceJson(`/api/v3/klines${url.search}`);
   return rows.map((row) => ({
     openTime: row[0],
     high: Number(row[2]),
@@ -174,6 +169,16 @@ async function fetchBinanceCandles(symbol, interval, limit) {
     close: Number(row[4]),
     volume: Number(row[5]),
   }));
+}
+
+async function fetchBinanceJson(path) {
+  const errors = [];
+  for (const base of BINANCE_API_BASES) {
+    const response = await fetch(`${base}${path}`, { headers: { accept: "application/json" } });
+    if (response.ok) return response.json();
+    errors.push(`${base} ${response.status}`);
+  }
+  throw new Error(`Binance request failed: ${errors.join(", ")}`);
 }
 
 function calculateSignal(coin, timeframe, candles) {
