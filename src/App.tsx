@@ -71,6 +71,10 @@ function formatNumber(value: number | null, digits = 2) {
   return value.toLocaleString("ko-KR", { maximumFractionDigits: digits });
 }
 
+function displaySymbol(symbol: string) {
+  return symbol.endsWith("USDT") ? symbol.slice(0, -4) : symbol;
+}
+
 function average(values: number[]) {
   if (values.length === 0) return 0;
   return values.reduce((sum, value) => sum + value, 0) / values.length;
@@ -468,7 +472,7 @@ export default function App() {
               {watchlist.map((item) => (
                 <article className="watchItem" key={item.id}>
                   <div>
-                    <strong>{item.symbol}</strong>
+                    <strong>{displaySymbol(item.symbol)}</strong>
                     <span>{item.exchange.toUpperCase()} · {item.timeframe}</span>
                   </div>
                   <dl>
@@ -512,7 +516,7 @@ export default function App() {
                 {signals.map((signal) => (
                   <article className={`signalRow ${signal.direction}`} key={signal.id}>
                     <div>
-                      <strong>{signal.symbol} {signal.score !== undefined ? `· ${signal.score}` : ""}</strong>
+                      <strong>{displaySymbol(signal.symbol)} {signal.score !== undefined ? `· ${signal.score}` : ""}</strong>
                       <span>{signal.reason}</span>
                     </div>
                     <div className="signalMeta">
