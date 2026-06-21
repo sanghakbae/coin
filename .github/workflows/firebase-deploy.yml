@@ -1,0 +1,44 @@
+name: Firebase Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install app dependencies
+        run: npm ci
+
+      - name: Install functions dependencies
+        run: npm --prefix functions ci
+
+      - name: Build
+        run: npm run build && npm run functions:build
+
+      - name: Deploy to Firebase
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          channelId: live
+          projectId: ${{ secrets.FIREBASE_PROJECT_ID }}
+        env:
+          FIREBASE_CLI_EXPERIMENTS: webframeworks
+
+      - name: Deploy functions and rules
+        run: npx firebase-tools deploy --only functions,firestore --project "${{ secrets.FIREBASE_PROJECT_ID }}"
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
