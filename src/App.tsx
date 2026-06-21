@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { CandlestickChart, LogIn, LogOut, Plus, Radio, Settings, Trash2 } from "lucide-react";
+import { Activity, CandlestickChart, LogIn, LogOut, Plus, Radio, Settings, Trash2 } from "lucide-react";
 import { GoogleAuthProvider, User, onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
 import { collection, doc, onSnapshot, serverTimestamp, setDoc } from "firebase/firestore";
 import { auth, db } from "./firebase";
@@ -437,7 +437,7 @@ export default function App() {
   const [authBusy, setAuthBusy] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
   const [usdKrw, setUsdKrw] = useState<number | null>(null);
-  const [activeView, setActiveView] = useState<"markets" | "settings">("markets");
+  const [activeView, setActiveView] = useState<"dashboard" | "markets" | "settings">("dashboard");
   const [coinInput, setCoinInput] = useState("");
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
   const [chartRange, setChartRange] = useState<ChartRange>("1y");
@@ -450,8 +450,13 @@ export default function App() {
     }
   });
   const latest = useMemo(() => signals.find((signal) => signal.symbol === selectedSymbol) ?? signals[0], [selectedSymbol, signals]);
-  const buySignals = useMemo(() => signals.filter((signal) => signal.direction === "buy"), [signals]);
-  const sellSignals = useMemo(() => signals.filter((signal) => signal.direction === "sell"), [signals]);
+  const watchedSignalSymbols = useMemo(() => new Set(watchSymbols), [watchSymbols]);
+  const watchedSignals = useMemo(
+    () => signals.filter((signal) => watchedSignalSymbols.has(signal.symbol)),
+    [signals, watchedSignalSymbols],
+  );
+  const buySignals = useMemo(() => watchedSignals.filter((signal) => signal.direction === "buy"), [watchedSignals]);
+  const sellSignals = useMemo(() => watchedSignals.filter((signal) => signal.direction === "sell"), [watchedSignals]);
 
   useEffect(() => {
     if (!auth) return undefined;
@@ -599,6 +604,10 @@ export default function App() {
 
   const navButtons = (
     <>
+      <button className={activeView === "dashboard" ? "active" : ""} type="button" title="대시보드" onClick={() => setActiveView("dashboard")}>
+        <Activity size={18} />
+        <span>대시보드</span>
+      </button>
       <button className={activeView === "markets" ? "active" : ""} type="button" title="Top 50" onClick={() => setActiveView("markets")}>
         <Radio size={18} />
         <span>Top 50</span>
@@ -669,10 +678,16 @@ export default function App() {
 
         <header className="topbar">
           <div>
-            <h1>Top 50 현재가</h1>
+            <h1>{activeView === "dashboard" ? "대시보드" : activeView === "markets" ? "시총 Top 50" : "관심 코인 설정"}</h1>
           </div>
           <div className="signalBadge neutral">
-            <span>{signals.length ? `${signals.length}개` : "로딩 중"}</span>
+            <span>
+              {activeView === "dashboard"
+                ? `${buySignals.length + sellSignals.length}개`
+                : activeView === "markets"
+                  ? signals.length ? `${signals.length}개` : "로딩 중"
+                  : `${watchSymbols.length}개`}
+            </span>
           </div>
         </header>
 
@@ -722,7 +737,7 @@ export default function App() {
           </section>
         ) : (
           <>
-            {activeView === "markets" && (
+            {activeView === "dashboard" && (
               <>
                 <section className="panel watchPanel">
                   <div className="panelHeader">
@@ -754,7 +769,7 @@ export default function App() {
                   </div>
                   {buySignals.length === 0 ? (
                     <div className="emptyState">
-                      <p>현재 조건에 맞는 매수 신호가 없습니다.</p>
+                      <p>{watchSymbols.length ? "관심 코인 중 현재 조건에 맞는 매수 신호가 없습니다." : "설정에서 관심 코인을 먼저 추가하세요."}</p>
                     </div>
                   ) : (
                     <div className="buySignalList">
@@ -788,7 +803,7 @@ export default function App() {
                   </div>
                   {sellSignals.length === 0 ? (
                     <div className="emptyState">
-                      <p>현재 강한 하락 위험 신호가 없습니다.</p>
+                      <p>{watchSymbols.length ? "관심 코인 중 현재 강한 하락 위험 신호가 없습니다." : "설정에서 관심 코인을 먼저 추가하세요."}</p>
                     </div>
                   ) : (
                     <div className="buySignalList">
@@ -814,7 +829,11 @@ export default function App() {
                     </div>
                   )}
                 </section>
+              </>
+            )}
 
+            {activeView === "markets" && (
+              <>
                 <section className="panel marketPanel">
                   <div className="panelHeader">
                     <h2>시총 Top 50</h2>
@@ -834,7 +853,7 @@ export default function App() {
                     <div className="marketList">
                       {signals.map((signal) => (
                       <button
-                        className={`marketRow ${signal.direction === "buy" ? "buySignal" : ""} ${latest?.symbol === signal.symbol ? "active" : ""}`}
+                        className={`marketRow ${watchedSignalSymbols.has(signal.symbol) && signal.direction === "buy" ? "buySignal" : ""} ${latest?.symbol === signal.symbol ? "active" : ""}`}
                         key={signal.id}
                         type="button"
                         onClick={() => setSelectedSymbol(signal.symbol)}

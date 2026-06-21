@@ -113,11 +113,21 @@ export const scanCoinSignals = onSchedule(
   },
   async () => {
     const db = getFirestore();
-    const [coins, tradableSymbols] = await Promise.all([fetchTopMarketCapCoins(), fetchBinanceTradingSymbols()]);
-    const universe = coins.filter((coin) => !EXCLUDED_ASSETS.has(coin.symbol) && tradableSymbols.has(coin.binanceSymbol));
+    const [coins, tradableSymbols, watchSymbols] = await Promise.all([
+      fetchTopMarketCapCoins(),
+      fetchBinanceTradingSymbols(),
+      fetchWatchSymbols(),
+    ]);
+    const universe = coins.filter(
+      (coin) =>
+        watchSymbols.has(coin.binanceSymbol) &&
+        !EXCLUDED_ASSETS.has(coin.symbol) &&
+        tradableSymbols.has(coin.binanceSymbol),
+    );
 
     logger.info("Signal scan universe prepared", {
       topMarketCap: coins.length,
+      watchlist: watchSymbols.size,
       binanceTradable: universe.length,
     });
 
@@ -182,6 +192,34 @@ async function scanCoin(coin: MarketCoin): Promise<Signal[]> {
   }
 
   return results;
+}
+
+async function fetchWatchSymbols() {
+  const db = getFirestore();
+  const users = await db.collection("users").get();
+  const symbols = new Set<string>();
+
+  await Promise.all(
+    users.docs.map(async (userDoc) => {
+      const watchlist = await userDoc.ref.collection("settings").doc("watchlist").get();
+      const rows = watchlist.exists ? watchlist.data()?.symbols : null;
+      if (!Array.isArray(rows)) return;
+
+      for (const row of rows) {
+        if (typeof row !== "string") continue;
+        const normalized = normalizeBinanceSymbol(row);
+        if (normalized) symbols.add(normalized);
+      }
+    }),
+  );
+
+  return symbols;
+}
+
+function normalizeBinanceSymbol(value: string) {
+  const cleaned = value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (!cleaned) return "";
+  return cleaned.endsWith("USDT") ? cleaned : `${cleaned}USDT`;
 }
 
 async function fetchTopMarketCapCoins(): Promise<MarketCoin[]> {
