@@ -23,6 +23,7 @@ export interface SignalRecord {
   atrPercent?: number | null;
   bollingerPosition?: number | null;
   volumeRatio: number | null;
+  candles?: number[];
   newsScore?: number;
   newsArticleCount?: number;
   components?: Record<string, number>;

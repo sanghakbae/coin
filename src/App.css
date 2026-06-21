@@ -292,6 +292,88 @@ h1 {
   font-weight: 700;
 }
 
+.chartPanel {
+  overflow: hidden;
+}
+
+.chartBox {
+  min-width: 0;
+}
+
+.chartBox svg {
+  display: block;
+  width: 100%;
+}
+
+.chartBox.large {
+  padding: 18px;
+}
+
+.chartBox.large svg {
+  height: 220px;
+}
+
+.chartBox.mini {
+  width: 150px;
+  flex: 0 0 150px;
+}
+
+.chartBox.mini svg {
+  height: 54px;
+}
+
+.chartHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.chartHeader div {
+  display: grid;
+  gap: 4px;
+}
+
+.chartHeader strong {
+  font-size: 24px;
+}
+
+.chartHeader span {
+  color: #667383;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.chartHeader b {
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.positive {
+  color: #075f4e;
+  background: #d7f5ec;
+}
+
+.negative {
+  color: #9c2d2b;
+  background: #fde2df;
+}
+
+.chartGrid {
+  stroke: #d9e1e8;
+  stroke-width: 1;
+}
+
+.chartEmpty {
+  display: grid;
+  place-items: center;
+  min-height: 54px;
+  color: #667383;
+  font-size: 12px;
+}
+
 .watchList,
 .signalList {
   display: grid;
@@ -523,6 +605,11 @@ h1 {
     grid-template-columns: 1fr;
   }
 
+  .chartBox.mini {
+    width: 100%;
+    flex-basis: auto;
+  }
+
   .signalMeta {
     display: flex;
     justify-content: space-between;
@@ -561,6 +648,18 @@ h1 {
   .watchItem,
   .signalRow {
     padding: 14px;
+  }
+
+  .chartBox.large {
+    padding: 14px;
+  }
+
+  .chartBox.large svg {
+    height: 170px;
+  }
+
+  .chartHeader strong {
+    font-size: 20px;
   }
 
   .userMenu button span {

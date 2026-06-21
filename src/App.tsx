@@ -155,6 +155,7 @@ function buildLiveSignal(coin: MarketCoin, timeframe: string, candles: BinanceCa
     ema50,
     ema200,
     volumeRatio,
+    candles: closes.slice(-72),
     newsScore: 0,
     newsArticleCount: 0,
     createdAt: {
@@ -252,6 +253,55 @@ async function fetchLiveTopSignals() {
   return signals
     .filter(Boolean)
     .sort((left, right) => Math.abs(right.score ?? 0) - Math.abs(left.score ?? 0));
+}
+
+function chartPath(values: number[], width: number, height: number, padding = 8) {
+  if (values.length < 2) return "";
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+  const usableWidth = width - padding * 2;
+  const usableHeight = height - padding * 2;
+
+  return values
+    .map((value, index) => {
+      const x = padding + (index / (values.length - 1)) * usableWidth;
+      const y = padding + (1 - (value - min) / range) * usableHeight;
+      return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+    })
+    .join(" ");
+}
+
+function Sparkline({ values, direction, large = false }: { values?: number[]; direction: string; large?: boolean }) {
+  const width = large ? 720 : 160;
+  const height = large ? 220 : 54;
+  const path = chartPath(values ?? [], width, height, large ? 16 : 6);
+  const color = direction === "buy" ? "#0f8b72" : direction === "sell" ? "#df5b50" : "#607084";
+  const first = values?.[0] ?? null;
+  const last = values?.[values.length - 1] ?? null;
+  const change = first && last ? ((last - first) / first) * 100 : null;
+
+  return (
+    <div className={large ? "chartBox large" : "chartBox mini"}>
+      {large && (
+        <div className="chartHeader">
+          <div>
+            <strong>{last ? `${formatNumber(last, 4)} USDT` : "-"}</strong>
+            <span>최근 72개 1시간봉</span>
+          </div>
+          <b className={change !== null && change >= 0 ? "positive" : "negative"}>{change !== null ? `${change >= 0 ? "+" : ""}${formatNumber(change)}%` : "-"}</b>
+        </div>
+      )}
+      {path ? (
+        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="가격 추세 그래프" preserveAspectRatio="none">
+          <path className="chartGrid" d={`M 0 ${height - 1} L ${width} ${height - 1}`} />
+          <path d={path} fill="none" stroke={color} strokeWidth={large ? 3 : 2.2} strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      ) : (
+        <div className="chartEmpty">차트 대기</div>
+      )}
+    </div>
+  );
 }
 
 export default function App() {
@@ -462,6 +512,16 @@ export default function App() {
           </article>
         </section>
 
+        {latest && (
+          <section className="panel chartPanel" aria-label="대표 코인 가격 그래프">
+            <div className="panelHeader">
+              <h2>{displaySymbol(latest.symbol)} 가격 추세</h2>
+              <span>{latest.timeframe}</span>
+            </div>
+            <Sparkline values={latest.candles} direction={latest.direction} large />
+          </section>
+        )}
+
         <section className="workspace">
           <div className="panel">
             <div className="panelHeader">
@@ -519,6 +579,7 @@ export default function App() {
                       <strong>{displaySymbol(signal.symbol)} {signal.score !== undefined ? `· ${signal.score}` : ""}</strong>
                       <span>{signal.reason}</span>
                     </div>
+                    <Sparkline values={signal.candles} direction={signal.direction} />
                     <div className="signalMeta">
                       <span>{signal.timeframe}</span>
                       <time>{formatTime(signal)}</time>
