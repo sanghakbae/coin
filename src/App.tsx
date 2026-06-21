@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { Activity, Bell, CandlestickChart, CircleAlert, LogIn, LogOut, Radio, Settings } from "lucide-react";
+import { Activity, Bell, CandlestickChart, CircleAlert, LogIn, LogOut, Plus, Radio, Settings, Trash2 } from "lucide-react";
 import { GoogleAuthProvider, User, onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
-import { collection, limit, onSnapshot, orderBy, query } from "firebase/firestore";
+import { collection, doc, limit, onSnapshot, orderBy, query, serverTimestamp, setDoc } from "firebase/firestore";
 import { auth, db, hasFirebaseConfig } from "./firebase";
 import type { SignalRecord, WatchItem } from "./types";
 
@@ -17,6 +17,7 @@ const demoWatchlist: WatchItem[] = [
     volumeSpike: 1.8,
   },
 ];
+const WATCHLIST_STORAGE_KEY = "coin-signal-watchlist";
 
 interface BinanceCandle {
   close: number;
@@ -73,6 +74,12 @@ function formatNumber(value: number | null, digits = 2) {
 
 function displaySymbol(symbol: string) {
   return symbol.endsWith("USDT") ? symbol.slice(0, -4) : symbol;
+}
+
+function normalizeWatchSymbol(value: string) {
+  const cleaned = value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (!cleaned) return "";
+  return cleaned.endsWith("USDT") ? cleaned : `${cleaned}USDT`;
 }
 
 function average(values: number[]) {
@@ -309,28 +316,72 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
+  const [activeView, setActiveView] = useState<"signals" | "alerts" | "settings">("signals");
+  const [coinInput, setCoinInput] = useState("");
+  const [watchSymbols, setWatchSymbols] = useState<string[]>(() => {
+    try {
+      const saved = window.localStorage.getItem(WATCHLIST_STORAGE_KEY);
+      return saved ? (JSON.parse(saved) as string[]) : [];
+    } catch {
+      return [];
+    }
+  });
   const latest = signals[0];
   const watchlist = useMemo<WatchItem[]>(
     () =>
-      signals.length
-        ? signals.slice(0, 5).map((signal) => ({
-            id: signal.symbol,
-            symbol: signal.symbol,
-            timeframe: signal.timeframe,
+      (watchSymbols.length ? watchSymbols : signals.slice(0, 5).map((signal) => signal.symbol)).map((symbol) => ({
+            id: symbol,
+            symbol,
+            timeframe: signals.find((signal) => signal.symbol === symbol)?.timeframe ?? "1h",
             enabled: true,
             exchange: "binance",
             rsiBuy: 30,
             rsiSell: 70,
             volumeSpike: 1.8,
-          }))
-        : demoWatchlist,
-    [signals],
+          })),
+    [signals, watchSymbols],
+  );
+  const filteredWatchlist = watchlist.length ? watchlist : demoWatchlist;
+  const recentSignals = useMemo(
+    () =>
+      watchSymbols.length
+        ? [...signals.filter((signal) => watchSymbols.includes(signal.symbol)), ...signals.filter((signal) => !watchSymbols.includes(signal.symbol))]
+        : signals,
+    [signals, watchSymbols],
   );
 
   useEffect(() => {
     if (!auth) return undefined;
     return onAuthStateChanged(auth, setUser);
   }, []);
+
+  useEffect(() => {
+    if (!user || !db) {
+      window.localStorage.setItem(WATCHLIST_STORAGE_KEY, JSON.stringify(watchSymbols));
+    }
+  }, [user, watchSymbols]);
+
+  useEffect(() => {
+    if (!user || !db) return undefined;
+    const watchlistRef = doc(db, "users", user.uid, "settings", "watchlist");
+
+    return onSnapshot(watchlistRef, async (snapshot) => {
+      const symbols = snapshot.exists() ? snapshot.data().symbols : null;
+      if (Array.isArray(symbols)) {
+        setWatchSymbols(symbols.filter((symbol): symbol is string => typeof symbol === "string"));
+        return;
+      }
+
+      const saved = window.localStorage.getItem(WATCHLIST_STORAGE_KEY);
+      const localSymbols = saved ? (JSON.parse(saved) as string[]) : [];
+      if (localSymbols.length) {
+        await setDoc(watchlistRef, {
+          symbols: localSymbols,
+          updatedAt: serverTimestamp(),
+        });
+      }
+    });
+  }, [user]);
 
   useEffect(() => {
     let hasFirestoreSignals = false;
@@ -414,6 +465,46 @@ export default function App() {
     }
   }
 
+  async function saveWatchSymbols(next: string[]) {
+    setWatchSymbols(next);
+    if (user && db) {
+      await setDoc(doc(db, "users", user.uid, "settings", "watchlist"), {
+        symbols: next,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      window.localStorage.setItem(WATCHLIST_STORAGE_KEY, JSON.stringify(next));
+    }
+  }
+
+  function addWatchSymbol(value: string) {
+    const symbol = normalizeWatchSymbol(value);
+    if (!symbol) return;
+    void saveWatchSymbols(watchSymbols.includes(symbol) ? watchSymbols : [...watchSymbols, symbol]);
+    setCoinInput("");
+  }
+
+  function removeWatchSymbol(symbol: string) {
+    void saveWatchSymbols(watchSymbols.filter((item) => item !== symbol));
+  }
+
+  const navButtons = (
+    <>
+      <button className={activeView === "signals" ? "active" : ""} type="button" title="실시간 신호" onClick={() => setActiveView("signals")}>
+        <Radio size={18} />
+        <span>실시간 신호</span>
+      </button>
+      <button className={activeView === "alerts" ? "active" : ""} type="button" title="알림 내역" onClick={() => setActiveView("alerts")}>
+        <Bell size={18} />
+        <span>알림 내역</span>
+      </button>
+      <button className={activeView === "settings" ? "active" : ""} type="button" title="설정" onClick={() => setActiveView("settings")}>
+        <Settings size={18} />
+        <span>설정</span>
+      </button>
+    </>
+  );
+
   return (
     <main className="appShell">
       <header className="mobileHeader">
@@ -445,18 +536,7 @@ export default function App() {
         </div>
 
         <nav className="navList" aria-label="주요 메뉴">
-          <button className="active" type="button" title="실시간 신호">
-            <Radio size={18} />
-            <span>실시간 신호</span>
-          </button>
-          <button type="button" title="알림 내역">
-            <Bell size={18} />
-            <span>알림 내역</span>
-          </button>
-          <button type="button" title="설정">
-            <Settings size={18} />
-            <span>설정</span>
-          </button>
+          {navButtons}
         </nav>
       </aside>
 
@@ -493,118 +573,161 @@ export default function App() {
           </div>
         </header>
 
-        <section className="metricGrid" aria-label="최신 지표">
-          <article className="metric">
-            <span>가격</span>
-            <strong>{latest ? `${formatNumber(latest.price, 4)} USDT` : "-"}</strong>
-          </article>
-          <article className="metric">
-            <span>RSI</span>
-            <strong>{latest ? formatNumber(latest.rsi) : "-"}</strong>
-          </article>
-          <article className="metric">
-            <span>점수</span>
-            <strong>{latest ? formatNumber(latest.score ?? 0, 0) : "-"}</strong>
-          </article>
-          <article className="metric">
-            <span>뉴스</span>
-            <strong>{latest ? `${formatNumber(latest.newsScore ?? 0, 0)} / ${latest.newsArticleCount ?? 0}건` : "-"}</strong>
-          </article>
-        </section>
-
-        {latest && (
-          <section className="panel chartPanel" aria-label="대표 코인 가격 그래프">
+        {activeView === "settings" ? (
+          <section className="panel settingsPanel">
             <div className="panelHeader">
-              <h2>{displaySymbol(latest.symbol)} 가격 추세</h2>
-              <span>{latest.timeframe}</span>
+              <h2>관심 코인 설정</h2>
+              <span>{watchSymbols.length}개</span>
             </div>
-            <Sparkline values={latest.candles} direction={latest.direction} large />
-          </section>
-        )}
-
-        <section className="workspace">
-          <div className="panel">
-            <div className="panelHeader">
-              <h2>관심 코인</h2>
-              <span>{watchlist.length}개</span>
+            <form
+              className="coinForm"
+              onSubmit={(event) => {
+                event.preventDefault();
+                addWatchSymbol(coinInput);
+              }}
+            >
+              <input value={coinInput} onChange={(event) => setCoinInput(event.target.value)} placeholder="BTC, ETH, SOL" aria-label="관심 코인" />
+              <button type="submit" title="관심 코인 추가">
+                <Plus size={17} />
+                <span>추가</span>
+              </button>
+            </form>
+            <div className="coinChipList">
+              {watchSymbols.length === 0 ? (
+                <p className="helperText">관심 코인을 추가하면 대시보드의 관심 코인 영역과 최근 신호 우선순위에 반영됩니다.</p>
+              ) : (
+                watchSymbols.map((symbol) => (
+                  <span className="coinChip" key={symbol}>
+                    {displaySymbol(symbol)}
+                    <button type="button" onClick={() => removeWatchSymbol(symbol)} title={`${displaySymbol(symbol)} 삭제`}>
+                      <Trash2 size={14} />
+                    </button>
+                  </span>
+                ))
+              )}
             </div>
-            <div className="watchList">
-              {watchlist.map((item) => (
-                <article className="watchItem" key={item.id}>
-                  <div>
-                    <strong>{displaySymbol(item.symbol)}</strong>
-                    <span>{item.exchange.toUpperCase()} · {item.timeframe}</span>
-                  </div>
-                  <dl>
-                    <div>
-                      <dt>RSI 매수</dt>
-                      <dd>{item.rsiBuy}</dd>
-                    </div>
-                    <div>
-                      <dt>RSI 매도</dt>
-                      <dd>{item.rsiSell}</dd>
-                    </div>
-                    <div>
-                      <dt>거래량</dt>
-                      <dd>{item.volumeSpike}x</dd>
-                    </div>
-                  </dl>
-                </article>
-              ))}
-            </div>
-          </div>
-
-          <div className="panel">
-            <div className="panelHeader">
-              <h2>최근 신호</h2>
-              <span>{signals.length}건</span>
-            </div>
-
-            {signals.length === 0 ? (
-              <div className="emptyState">
-                <CircleAlert size={22} />
-                <p>
-                  {liveError
-                    ? `Binance 실시간 데이터 오류: ${liveError}`
-                    : hasFirebaseConfig
-                      ? "Binance 실시간 데이터를 불러오는 중입니다."
-                      : ".env.local에 Firebase 웹앱 설정을 입력하면 Firestore 신호를 구독합니다."}
-                </p>
-              </div>
-            ) : (
-              <div className="signalList">
-                {signals.map((signal) => (
-                  <article className={`signalRow ${signal.direction}`} key={signal.id}>
-                    <div>
-                      <strong>{displaySymbol(signal.symbol)} {signal.score !== undefined ? `· ${signal.score}` : ""}</strong>
-                      <span>{signal.reason}</span>
-                    </div>
-                    <Sparkline values={signal.candles} direction={signal.direction} />
-                    <div className="signalMeta">
-                      <span>{signal.timeframe}</span>
-                      <time>{formatTime(signal)}</time>
-                    </div>
-                  </article>
+            <div className="suggestions">
+              <strong>현재 신호에서 빠르게 추가</strong>
+              <div>
+                {signals.slice(0, 12).map((signal) => (
+                  <button type="button" key={signal.symbol} onClick={() => addWatchSymbol(signal.symbol)}>
+                    {displaySymbol(signal.symbol)}
+                  </button>
                 ))}
               </div>
+            </div>
+          </section>
+        ) : (
+          <>
+            {activeView === "signals" && (
+              <>
+                <section className="metricGrid" aria-label="최신 지표">
+                  <article className="metric">
+                    <span>가격</span>
+                    <strong>{latest ? `${formatNumber(latest.price, 4)} USDT` : "-"}</strong>
+                  </article>
+                  <article className="metric">
+                    <span>RSI</span>
+                    <strong>{latest ? formatNumber(latest.rsi) : "-"}</strong>
+                  </article>
+                  <article className="metric">
+                    <span>점수</span>
+                    <strong>{latest ? formatNumber(latest.score ?? 0, 0) : "-"}</strong>
+                  </article>
+                  <article className="metric">
+                    <span>뉴스</span>
+                    <strong>{latest ? `${formatNumber(latest.newsScore ?? 0, 0)} / ${latest.newsArticleCount ?? 0}건` : "-"}</strong>
+                  </article>
+                </section>
+
+                {latest && (
+                  <section className="panel chartPanel" aria-label="대표 코인 가격 그래프">
+                    <div className="panelHeader">
+                      <h2>{displaySymbol(latest.symbol)} 가격 추세</h2>
+                      <span>{latest.timeframe}</span>
+                    </div>
+                    <Sparkline values={latest.candles} direction={latest.direction} large />
+                  </section>
+                )}
+              </>
             )}
-          </div>
-        </section>
+
+            <section className="workspace">
+              {activeView === "signals" && (
+                <div className="panel">
+                  <div className="panelHeader">
+                    <h2>관심 코인</h2>
+                    <span>{filteredWatchlist.length}개</span>
+                  </div>
+                  <div className="watchList">
+                    {filteredWatchlist.map((item) => (
+                      <article className="watchItem" key={item.id}>
+                        <div>
+                          <strong>{displaySymbol(item.symbol)}</strong>
+                          <span>{item.exchange.toUpperCase()} · {item.timeframe}</span>
+                        </div>
+                        <dl>
+                          <div>
+                            <dt>RSI 매수</dt>
+                            <dd>{item.rsiBuy}</dd>
+                          </div>
+                          <div>
+                            <dt>RSI 매도</dt>
+                            <dd>{item.rsiSell}</dd>
+                          </div>
+                          <div>
+                            <dt>거래량</dt>
+                            <dd>{item.volumeSpike}x</dd>
+                          </div>
+                        </dl>
+                      </article>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="panel">
+                <div className="panelHeader">
+                  <h2>{activeView === "alerts" ? "알림 내역" : "최근 신호"}</h2>
+                  <span>{recentSignals.length}건</span>
+                </div>
+
+                {recentSignals.length === 0 ? (
+                  <div className="emptyState">
+                    <CircleAlert size={22} />
+                    <p>
+                      {liveError
+                        ? `Binance 실시간 데이터 오류: ${liveError}`
+                        : hasFirebaseConfig
+                          ? "Binance 실시간 데이터를 불러오는 중입니다."
+                          : ".env.local에 Firebase 웹앱 설정을 입력하면 Firestore 신호를 구독합니다."}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="signalList">
+                    {recentSignals.map((signal) => (
+                      <article className={`signalRow ${signal.direction}`} key={signal.id}>
+                        <div>
+                          <strong>{displaySymbol(signal.symbol)} {signal.score !== undefined ? `· ${signal.score}` : ""}</strong>
+                          <span>{signal.reason}</span>
+                        </div>
+                        <Sparkline values={signal.candles} direction={signal.direction} />
+                        <div className="signalMeta">
+                          <span>{signal.timeframe}</span>
+                          <time>{formatTime(signal)}</time>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </section>
+          </>
+        )}
       </section>
 
       <nav className="mobileNav" aria-label="모바일 주요 메뉴">
-        <button className="active" type="button" title="실시간 신호">
-          <Radio size={20} />
-          <span>신호</span>
-        </button>
-        <button type="button" title="알림 내역">
-          <Bell size={20} />
-          <span>알림</span>
-        </button>
-        <button type="button" title="설정">
-          <Settings size={20} />
-          <span>설정</span>
-        </button>
+        {navButtons}
       </nav>
     </main>
   );

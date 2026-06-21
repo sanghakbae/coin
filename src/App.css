@@ -476,6 +476,106 @@ h1 {
   color: #667383;
 }
 
+.settingsPanel {
+  display: grid;
+  align-content: start;
+}
+
+.coinForm {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  gap: 10px;
+  padding: 18px;
+  border-bottom: 1px solid #edf0f3;
+}
+
+.coinForm input {
+  min-width: 0;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid #cfd7df;
+  border-radius: 8px;
+  color: #18202a;
+  background: #ffffff;
+  font: inherit;
+}
+
+.coinForm button,
+.coinChip button,
+.suggestions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 38px;
+  border: 1px solid #cfd7df;
+  border-radius: 8px;
+  color: #18202a;
+  background: #ffffff;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.coinForm button {
+  padding: 0 13px;
+}
+
+.coinChipList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 74px;
+  padding: 18px;
+  border-bottom: 1px solid #edf0f3;
+}
+
+.coinChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 6px 0 12px;
+  border: 1px solid #cfe4df;
+  border-radius: 999px;
+  color: #075f4e;
+  background: #e5f5f1;
+  font-weight: 900;
+}
+
+.coinChip button {
+  width: 26px;
+  min-height: 26px;
+  padding: 0;
+  border-radius: 50%;
+  color: #075f4e;
+  background: #ffffff;
+}
+
+.helperText {
+  color: #667383;
+  line-height: 1.5;
+}
+
+.suggestions {
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+}
+
+.suggestions > strong {
+  font-size: 14px;
+}
+
+.suggestions > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.suggestions button {
+  padding: 0 12px;
+}
+
 @media (min-width: 1280px) {
   .metricGrid {
     grid-template-columns: repeat(4, minmax(180px, 1fr));
@@ -650,6 +750,16 @@ h1 {
 
   .watchItem,
   .signalRow {
+    padding: 14px;
+  }
+
+  .coinForm {
+    grid-template-columns: 1fr;
+    padding: 14px;
+  }
+
+  .coinChipList,
+  .suggestions {
     padding: 14px;
   }
 
