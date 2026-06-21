@@ -89,6 +89,25 @@ export default function App() {
 
   return (
     <main className="appShell">
+      <header className="mobileHeader">
+        <div className="brand">
+          <CandlestickChart size={23} />
+          <div>
+            <strong>Coin Signal</strong>
+            <span>Kakao alert bot</span>
+          </div>
+        </div>
+        {user ? (
+          <button className="mobileAvatar" type="button" onClick={handleLogout} disabled={authBusy} title="로그아웃">
+            {user.photoURL ? <img src={user.photoURL} alt="" /> : <span>{user.displayName?.[0] ?? "U"}</span>}
+          </button>
+        ) : (
+          <button className="mobileLogin" type="button" onClick={handleGoogleLogin} disabled={!auth || authBusy} title="Google 로그인">
+            <LogIn size={17} />
+          </button>
+        )}
+      </header>
+
       <aside className="sidebar">
         <div className="brand">
           <CandlestickChart size={24} />
@@ -150,7 +169,7 @@ export default function App() {
         <section className="metricGrid" aria-label="최신 지표">
           <article className="metric">
             <span>가격</span>
-            <strong>{latest ? `${formatNumber(latest.price, 0)}원` : "-"}</strong>
+            <strong>{latest ? `${formatNumber(latest.price, 4)} USDT` : "-"}</strong>
           </article>
           <article className="metric">
             <span>RSI</span>
@@ -217,10 +236,10 @@ export default function App() {
               <div className="signalList">
                 {signals.map((signal) => (
                   <article className={`signalRow ${signal.direction}`} key={signal.id}>
-                  <div>
-                    <strong>{signal.symbol} {signal.score !== undefined ? `· ${signal.score}` : ""}</strong>
-                    <span>{signal.reason}</span>
-                  </div>
+                    <div>
+                      <strong>{signal.symbol} {signal.score !== undefined ? `· ${signal.score}` : ""}</strong>
+                      <span>{signal.reason}</span>
+                    </div>
                     <div className="signalMeta">
                       <span>{signal.timeframe}</span>
                       <time>{formatTime(signal)}</time>
@@ -232,6 +251,21 @@ export default function App() {
           </div>
         </section>
       </section>
+
+      <nav className="mobileNav" aria-label="모바일 주요 메뉴">
+        <button className="active" type="button" title="실시간 신호">
+          <Radio size={20} />
+          <span>신호</span>
+        </button>
+        <button type="button" title="알림 내역">
+          <Bell size={20} />
+          <span>알림</span>
+        </button>
+        <button type="button" title="설정">
+          <Settings size={20} />
+          <span>설정</span>
+        </button>
+      </nav>
     </main>
   );
 }

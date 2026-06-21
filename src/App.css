@@ -25,6 +25,11 @@ button {
   min-height: 100vh;
 }
 
+.mobileHeader,
+.mobileNav {
+  display: none;
+}
+
 .sidebar {
   display: flex;
   flex-direction: column;
@@ -88,7 +93,9 @@ button {
   display: grid;
   align-content: start;
   gap: 20px;
+  width: min(100%, 1480px);
   padding: 28px;
+  justify-self: center;
 }
 
 .accountBar {
@@ -384,54 +391,131 @@ h1 {
   color: #667383;
 }
 
-@media (max-width: 900px) {
+@media (min-width: 1280px) {
+  .metricGrid {
+    grid-template-columns: repeat(4, minmax(180px, 1fr));
+  }
+}
+
+@media (max-width: 1024px) {
   .appShell {
     grid-template-columns: 1fr;
+    min-height: 100dvh;
   }
 
   .sidebar {
+    display: none;
+  }
+
+  .mobileHeader {
     position: sticky;
     top: 0;
-    z-index: 2;
-    gap: 14px;
-    padding: 14px;
-    border-right: 0;
+    z-index: 4;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 64px;
+    padding: 10px 14px;
     border-bottom: 1px solid #dce1e7;
+    background: rgba(251, 252, 253, 0.96);
+    backdrop-filter: blur(10px);
   }
 
-  .navList {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .navList button {
+  .mobileLogin,
+  .mobileAvatar {
+    display: inline-flex;
+    align-items: center;
     justify-content: center;
+    width: 40px;
+    height: 40px;
+    border: 1px solid #cfd7df;
+    border-radius: 50%;
+    color: #18202a;
+    background: #ffffff;
+    cursor: pointer;
+  }
+
+  .mobileAvatar img,
+  .mobileAvatar span {
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+  }
+
+  .mobileAvatar img {
+    object-fit: cover;
+  }
+
+  .mobileAvatar span {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #ffffff;
+    background: #0f8b72;
+    font-weight: 900;
+  }
+
+  .mobileNav {
+    position: fixed;
+    right: 12px;
+    bottom: 12px;
+    left: 12px;
+    z-index: 5;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    padding: 8px;
+    border: 1px solid #d8dee5;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.97);
+    box-shadow: 0 12px 34px rgba(16, 24, 40, 0.16);
+    backdrop-filter: blur(10px);
+  }
+
+  .mobileNav button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 44px;
+    border: 0;
+    border-radius: 8px;
+    color: #596675;
+    background: transparent;
+    cursor: pointer;
+    font-weight: 800;
+  }
+
+  .mobileNav button.active {
+    color: #0e161f;
+    background: #e5f5f1;
   }
 
   .content {
-    padding: 20px 14px;
+    gap: 16px;
+    padding: 16px 14px 104px;
   }
 
   .accountBar {
-    justify-content: stretch;
+    display: none;
   }
 
-  .loginButton,
-  .userMenu {
-    width: 100%;
+  .topbar {
+    display: grid;
+    gap: 12px;
   }
 
-  .userMenu {
-    justify-content: space-between;
+  h1 {
+    font-size: 28px;
   }
 
-  .userMenu > div {
-    flex: 1;
+  .topbar p {
+    font-size: 14px;
   }
 
-  .topbar,
-  .signalRow {
-    align-items: stretch;
-    flex-direction: column;
+  .signalBadge {
+    width: fit-content;
   }
 
   .metricGrid,
@@ -446,14 +530,37 @@ h1 {
   }
 }
 
-@media (max-width: 560px) {
-  .brand span,
-  .navList button span {
-    display: none;
+@media (max-width: 640px) {
+  .mobileHeader .brand span {
+    font-size: 11px;
   }
 
-  .navList button {
-    min-height: 40px;
+  .content {
+    padding-inline: 10px;
+  }
+
+  .metricGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .metric {
+    min-height: 92px;
+    padding: 14px;
+  }
+
+  .metric strong {
+    font-size: 20px;
+  }
+
+  .panelHeader {
+    min-height: 52px;
+    padding: 0 14px;
+  }
+
+  .watchItem,
+  .signalRow {
+    padding: 14px;
   }
 
   .userMenu button span {
@@ -462,5 +569,25 @@ h1 {
 
   .watchItem dl {
     grid-template-columns: 1fr;
+  }
+
+  .mobileNav button {
+    flex-direction: column;
+    gap: 3px;
+    font-size: 11px;
+  }
+}
+
+@media (max-width: 420px) {
+  .mobileHeader .brand span {
+    display: none;
+  }
+
+  .metricGrid {
+    grid-template-columns: 1fr;
+  }
+
+  h1 {
+    font-size: 25px;
   }
 }
