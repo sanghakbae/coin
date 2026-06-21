@@ -1,0 +1,49 @@
+name: Scheduled Coin Alerts
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduled-coin-alerts
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    env:
+      FIREBASE_SERVICE_ACCOUNT_COIN_F1318: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_COIN_F1318 }}
+      KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
+      KAKAO_CLIENT_SECRET: ${{ secrets.KAKAO_CLIENT_SECRET }}
+      KAKAO_REFRESH_TOKEN: ${{ secrets.KAKAO_REFRESH_TOKEN }}
+      SITE_URL: https://coin.sanghak.kr
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install function dependencies
+        run: npm --prefix functions ci
+
+      - name: Check alert secrets
+        run: |
+          missing=0
+          for key in FIREBASE_SERVICE_ACCOUNT_COIN_F1318 KAKAO_REST_API_KEY KAKAO_REFRESH_TOKEN; do
+            if [ -z "${!key}" ]; then
+              echo "::error::Missing GitHub secret: $key"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Scan watched coins and send Kakao alerts
+        run: node scripts/github-scheduled-alert.mjs
