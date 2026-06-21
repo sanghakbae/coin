@@ -73,10 +73,30 @@ GitHub Actions 배포에 아래 값을 등록합니다.
 ```text
 FIREBASE_PROJECT_ID
 FIREBASE_SERVICE_ACCOUNT
-FIREBASE_TOKEN
+VITE_FIREBASE_API_KEY
+VITE_FIREBASE_AUTH_DOMAIN
+VITE_FIREBASE_PROJECT_ID
+VITE_FIREBASE_STORAGE_BUCKET
+VITE_FIREBASE_MESSAGING_SENDER_ID
+VITE_FIREBASE_APP_ID
+VITE_FIREBASE_MEASUREMENT_ID
+DEPLOY_FUNCTIONS
 ```
 
-Firebase Hosting만 action으로 배포하고, Functions와 Firestore는 `firebase-tools`로 배포합니다.
+`FIREBASE_SERVICE_ACCOUNT`는 Firebase Hosting과 Firestore Rules 배포 권한이 있는 서비스 계정 JSON입니다. 이 값이 없으면 GitHub Actions는 빌드까지만 수행하고 배포 step은 건너뜁니다. `DEPLOY_FUNCTIONS`는 기본값을 `false`로 두고, Firebase 프로젝트를 Blaze 요금제로 전환하고 Kakao secrets를 등록한 뒤 `true`로 바꾸세요.
+
+GitHub Actions는 `main` 브랜치 push 또는 수동 실행으로 Firebase Hosting과 Firestore Rules를 배포합니다.
+
+## Custom domain
+
+Firebase Hosting custom domain으로 `coin.sanghak.kr`을 등록했습니다. Cloudflare DNS에서 아래 레코드를 반영해야 도메인과 인증서 발급이 완료됩니다.
+
+```text
+coin.sanghak.kr CNAME coin-f1318.web.app
+_acme-challenge.coin.sanghak.kr TXT gX8shVmP_7RKD5ePdM3xe-Xfk34L4TcmorCJJjGadVo
+```
+
+현재 `coin.sanghak.kr`은 `sanghakbae.github.io`로 향하고 있으므로 기존 CNAME을 제거하고 위 CNAME으로 교체해야 합니다.
 
 ## 기본 신호 조건
 
