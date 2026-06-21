@@ -433,6 +433,7 @@ function Sparkline({ values, times, large = false }: { values?: number[]; times?
 
 export default function App() {
   const [signals, setSignals] = useState<SignalRecord[]>([]);
+  const [serverSignals, setServerSignals] = useState<SignalRecord[]>([]);
   const [user, setUser] = useState<User | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
@@ -451,9 +452,10 @@ export default function App() {
   });
   const latest = useMemo(() => signals.find((signal) => signal.symbol === selectedSymbol) ?? signals[0], [selectedSymbol, signals]);
   const watchedSignalSymbols = useMemo(() => new Set(watchSymbols), [watchSymbols]);
+  const signalSource = serverSignals.length ? serverSignals : signals;
   const watchedSignals = useMemo(
-    () => signals.filter((signal) => watchedSignalSymbols.has(signal.symbol)),
-    [signals, watchedSignalSymbols],
+    () => signalSource.filter((signal) => watchedSignalSymbols.has(signal.symbol)),
+    [signalSource, watchedSignalSymbols],
   );
   const buySignals = useMemo(() => watchedSignals.filter((signal) => signal.direction === "buy"), [watchedSignals]);
   const sellSignals = useMemo(() => watchedSignals.filter((signal) => signal.direction === "sell"), [watchedSignals]);
@@ -514,13 +516,12 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    let hasServerSignals = false;
     let active = true;
 
     async function loadLivePrices() {
       try {
         const liveSignals = await fetchLiveTopSignals();
-        if (active && !hasServerSignals) {
+        if (active) {
           setSignals(liveSignals);
           setLiveError(null);
         }
@@ -541,11 +542,7 @@ export default function App() {
             .filter((signal) => Array.isArray(signal.candles) && signal.candles.length > 1)
             .sort((left, right) => (left.marketCapRank ?? 999) - (right.marketCapRank ?? 999));
 
-          hasServerSignals = serverSignals.length > 0;
-          if (active && hasServerSignals) {
-            setSignals(serverSignals);
-            setLiveError(null);
-          }
+          if (active) setServerSignals(serverSignals);
         })
       : undefined;
 

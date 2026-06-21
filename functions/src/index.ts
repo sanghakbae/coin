@@ -52,6 +52,7 @@ interface Signal {
   score: number;
   reason: string;
   price: number;
+  dayChangePercent: number | null;
   rsi: number | null;
   macd: number | null;
   macdSignal: number | null;
@@ -80,6 +81,7 @@ const BUY_THRESHOLD = 50;
 const SELL_THRESHOLD = -50;
 const MAX_ALERTS_PER_RUN = 8;
 const SCAN_CONCURRENCY = 5;
+const PUMP_ALERT_THRESHOLD = 10;
 const EXCLUDED_ASSETS = new Set([
   "USDT",
   "USDC",
@@ -173,8 +175,17 @@ export const scanCoinSignals = onSchedule(
       await notifyOnDirectionChange(signal);
     }
 
+    const pumpSignals = ranked
+      .filter((signal) => signal.dayChangePercent !== null && signal.dayChangePercent >= PUMP_ALERT_THRESHOLD)
+      .slice(0, MAX_ALERTS_PER_RUN);
+
+    for (const signal of pumpSignals) {
+      await notifyOnPump(signal);
+    }
+
     const actionableKeys = new Set(actionable.map((signal) => `${signal.symbol}_${signal.timeframe}`));
     for (const signal of ranked) {
+      await updatePumpState(signal);
       if (!actionableKeys.has(`${signal.symbol}_${signal.timeframe}`)) {
         await updateCurrentDirection(signal);
       }
@@ -408,6 +419,7 @@ function calculateSignal(coin: MarketCoin, timeframe: string, candles: Candle[],
     score: round(score),
     reason: explainSignal(direction, components, news),
     price,
+    dayChangePercent: oneBarReturn,
     rsi,
     macd: macdNow?.macd ?? null,
     macdSignal: macdNow?.signal ?? null,
@@ -427,6 +439,44 @@ function calculateSignal(coin: MarketCoin, timeframe: string, candles: Candle[],
     newsArticleCount: news.articleCount,
     components,
   };
+}
+
+async function notifyOnPump(signal: Signal) {
+  const db = getFirestore();
+  const stateRef = db.collection("state").doc(`${signal.symbol}_${signal.timeframe}`);
+  const state = await stateRef.get();
+  const stateData = state.exists ? state.data() : undefined;
+  const wasPumped = Boolean(stateData?.pumpAlertActive);
+  const lastPumpPercent = Number(stateData?.lastPumpPercent ?? 0);
+
+  if (wasPumped && Math.abs((signal.dayChangePercent ?? 0) - lastPumpPercent) < 3) {
+    logger.info("Pump alert already notified", { symbol: signal.symbol, timeframe: signal.timeframe });
+    return;
+  }
+
+  await sendKakaoMemo(signal, "pump");
+  await db.collection("alertHistory").add({
+    symbol: signal.symbol,
+    asset: signal.asset,
+    coinName: signal.coinName,
+    marketCapRank: signal.marketCapRank,
+    timeframe: signal.timeframe,
+    direction: "pump",
+    score: signal.score,
+    reason: `24시간 ${round(signal.dayChangePercent)}% 상승`,
+    price: signal.price,
+    createdAt: FieldValue.serverTimestamp(),
+  });
+  await stateRef.set(
+    {
+      pumpAlertActive: true,
+      lastPumpPercent: signal.dayChangePercent,
+      lastPumpPrice: signal.price,
+      lastPumpAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    },
+    { merge: true },
+  );
 }
 
 async function notifyOnDirectionChange(signal: Signal) {
@@ -495,15 +545,33 @@ async function updateCurrentDirection(signal: Signal) {
     );
 }
 
-async function sendKakaoMemo(signal: Signal) {
+async function updatePumpState(signal: Signal) {
+  if ((signal.dayChangePercent ?? 0) >= PUMP_ALERT_THRESHOLD) return;
+
+  const db = getFirestore();
+  await db
+    .collection("state")
+    .doc(`${signal.symbol}_${signal.timeframe}`)
+    .set(
+      {
+        pumpAlertActive: false,
+        lastPumpResetPercent: signal.dayChangePercent,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+}
+
+async function sendKakaoMemo(signal: Signal, alertType: "signal" | "pump" = "signal") {
   const accessToken = await refreshKakaoAccessToken();
   const asset = signal.symbol.endsWith("USDT") ? signal.symbol.slice(0, -4) : signal.symbol;
-  const label = signal.direction === "buy" ? "매수 신호" : "하락 위험";
+  const label = alertType === "pump" ? "10% 이상 상승" : signal.direction === "buy" ? "매수 신호" : "하락 위험";
+  const detail = alertType === "pump" ? `24시간 상승률: ${round(signal.dayChangePercent)}%` : signal.reason;
   const message = `[${label}] ${asset} ${signal.timeframe}
 점수: ${signal.score}
 가격: ${signal.price.toLocaleString("ko-KR", { maximumFractionDigits: 6 })} USDT
 시총 순위: #${signal.marketCapRank}
-${signal.reason}`;
+${detail}`;
 
   const response = await fetch("https://kapi.kakao.com/v2/api/talk/memo/default/send", {
     method: "POST",

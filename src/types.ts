@@ -11,6 +11,7 @@ export interface SignalRecord {
   score?: number;
   reason: string;
   price: number;
+  dayChangePercent?: number | null;
   rsi: number | null;
   macd: number | null;
   macdSignal: number | null;

@@ -7,3 +7,5 @@ functions/lib
 functions/node_modules
 functions/.runtimeconfig.json
 .firebase
+firebase-debug.log
+firebase-debug.*.log

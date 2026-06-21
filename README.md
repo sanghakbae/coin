@@ -12,6 +12,7 @@ React + Vite + Firebase 기반 개인용 암호화폐 신호 알림 프로젝트
 - CoinGecko 시총 상위 50 후보 선정
 - Firestore 관심 코인만 자동 신호/카카오 알림 대상으로 사용
 - Binance USDT 현물 캔들 수집
+- 관심 코인 24시간 10% 이상 상승 시 카카오 알림
 - `1d` 일봉 기준 자동 스캔
 - EMA 50/200, MACD, RSI, Stochastic, CCI, Bollinger, ATR, OBV, 거래량 급증 점수
 - GDELT 공개 뉴스 제목 기반 간이 감성 점수
@@ -104,6 +105,7 @@ schedule: every 15 minutes
 buy threshold: score >= 50
 sell threshold: score <= -50
 max alerts per run: 8
+pump alert: 24h change >= 10%
 ```
 
 신호 점수는 추세, MACD, RSI, Stochastic, CCI, Bollinger, 거래량, OBV, 뉴스 점수를 합산합니다. 이 값들은 백테스트 결과에 맞춰 조정하는 편이 좋습니다.

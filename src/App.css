@@ -14,6 +14,7 @@ body,
 #root {
   width: 100%;
   min-width: 320px;
+  overflow-x: hidden;
 }
 
 body {
@@ -674,6 +675,7 @@ h1 {
   gap: 12px;
   width: 100%;
   min-width: 0;
+  max-width: 100%;
   padding: 10px 14px;
   border: 0;
   border-bottom: 1px solid #1c2530;
@@ -769,6 +771,14 @@ h1 {
   grid-template-columns: auto 1fr;
   align-items: baseline;
   column-gap: 8px;
+  min-width: 0;
+}
+
+.marketAsset,
+.marketPrice,
+.marketChange,
+.marketIndicators,
+.chartBox {
   min-width: 0;
 }
 
@@ -1251,12 +1261,54 @@ h1 {
   }
 
   .marketRow {
-    grid-template-columns: minmax(110px, 1fr) minmax(120px, auto) minmax(70px, auto);
+    grid-template-columns: minmax(74px, 0.85fr) minmax(96px, 1fr) minmax(56px, 0.45fr);
+    align-items: start;
+    gap: 6px;
+    padding: 8px 10px;
   }
 
   .marketIndicators,
   .marketRow .chartBox {
     grid-column: 1 / -1;
+  }
+
+  .marketAsset {
+    column-gap: 5px;
+  }
+
+  .marketAsset span {
+    font-size: 8px;
+  }
+
+  .marketAsset strong {
+    font-size: 12px;
+  }
+
+  .marketAsset small {
+    font-size: 8px;
+  }
+
+  .marketPrice {
+    font-size: 11px;
+  }
+
+  .priceStack small,
+  .marketChange {
+    font-size: 9px;
+  }
+
+  .marketIndicators {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 4px;
+  }
+
+  .marketIndicators span {
+    padding: 3px 4px;
+    font-size: 8px;
+  }
+
+  .chartBox.mini svg {
+    height: 26px;
   }
 
   .buySignalCard {
@@ -1352,12 +1404,12 @@ h1 {
   }
 
   .marketRow {
-    gap: 8px;
-    padding: 10px 12px;
+    gap: 5px;
+    padding: 6px 8px;
   }
 
   .marketIndicators {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
   }
 
   .buySignalCard {
@@ -1393,12 +1445,16 @@ h1 {
   }
 
   .marketRow {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(70px, 0.85fr) minmax(90px, 1fr) minmax(52px, 0.45fr);
   }
 
   .marketAsset small,
   .marketPrice,
   .marketChange {
     grid-column: auto;
+  }
+
+  .marketIndicators {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
