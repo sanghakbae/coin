@@ -154,6 +154,11 @@ h1 {
   background: rgba(27, 25, 13, 0.9);
 }
 
+.decisionPanel.pending {
+  border-left-color: #526174;
+  background: rgba(13, 19, 28, 0.9);
+}
+
 .decisionPanel > div:first-child {
   display: grid;
   gap: 6px;
@@ -181,6 +186,10 @@ h1 {
 
 .decisionPanel.neutral strong {
   color: #ffe66d;
+}
+
+.decisionPanel.pending strong {
+  color: #d5deea;
 }
 
 .decisionPanel p {
@@ -504,6 +513,53 @@ h1 {
   grid-template-columns: minmax(260px, 0.8fr) minmax(320px, 1fr) minmax(320px, 1fr);
   gap: 12px;
   min-width: 0;
+}
+
+.contextGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  min-width: 0;
+}
+
+.contextPanel {
+  min-width: 0;
+  padding: 14px;
+}
+
+a.contextPanel {
+  color: inherit;
+  text-decoration: none;
+}
+
+a.contextPanel:hover {
+  border-color: rgba(54, 231, 184, 0.42);
+  background: rgba(12, 25, 31, 0.92);
+}
+
+.contextPanel .panelTitle {
+  margin-bottom: 4px;
+}
+
+.contextPanel .panelTitle > svg:last-child:not(:first-child) {
+  margin-left: auto;
+  color: #728399;
+}
+
+.contextPanel dl {
+  gap: 0;
+}
+
+.contextPanel dl div {
+  padding: 9px 0;
+}
+
+.contextPanel > small {
+  display: block;
+  margin-top: 10px;
+  color: #718298;
+  font-size: 10px;
+  font-weight: 800;
 }
 
 .fundamentalGrid {
@@ -905,6 +961,10 @@ dd small {
     grid-template-columns: 1fr;
   }
 
+  .contextGrid {
+    grid-template-columns: 1fr 1fr;
+  }
+
   .fundamentalGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1001,6 +1061,7 @@ dd small {
   }
 
   .reasonPanel,
+  .contextPanel,
   .indicatorPanel,
   .newsPanel,
   .devPanel {
@@ -1009,6 +1070,11 @@ dd small {
 
   .reasonList {
     grid-template-columns: 1fr;
+  }
+
+  .contextGrid {
+    grid-template-columns: 1fr;
+    gap: 8px;
   }
 
   .fundamentalGrid {

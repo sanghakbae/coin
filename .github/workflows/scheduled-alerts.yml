@@ -29,6 +29,7 @@ jobs:
       WATCHLIST_SYMBOLS: ${{ secrets.WATCHLIST_SYMBOLS }}
       SITE_URL: https://dot.sanghak.kr
       KAKAO_TEST_MESSAGE: ${{ inputs.test_kakao || 'false' }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Checkout

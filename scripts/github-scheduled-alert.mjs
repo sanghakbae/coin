@@ -1,15 +1,18 @@
 import { createRequire } from "node:module";
+import { evaluateDotSignal } from "../src/signal-model.mjs";
 
 const require = createRequire(new URL("../functions/package.json", import.meta.url));
 const { cert, getApps, initializeApp } = require("firebase-admin/app");
 const { FieldValue, getFirestore } = require("firebase-admin/firestore");
+const xxhash = require("xxhash-wasm");
 
 const CANDLE_LIMIT = 365;
-const BUY_THRESHOLD = 35;
-const SELL_THRESHOLD = -35;
 const PUMP_ALERT_THRESHOLD = 10;
 const SITE_URL = process.env.SITE_URL || "https://dot.sanghak.kr";
 const BINANCE_API_BASES = ["https://data-api.binance.vision", "https://api.binance.com", "https://api1.binance.com"];
+const POLKADOT_RELAY_RPC_ENDPOINTS = ["https://rpc.polkadot.io", "https://polkadot-rpc.publicnode.com"];
+const POLKADOT_ASSET_HUB_RPC_ENDPOINTS = ["https://polkadot-asset-hub-rpc.polkadot.io", "https://asset-hub.polkadot.rpc.deserve.network"];
+const rpcPreferredEndpoint = new Map();
 const EXCLUDED_ASSETS = new Set([
   "USDT",
   "USDC",
@@ -40,29 +43,58 @@ main().catch((error) => {
 });
 
 async function main() {
-  assertEnv("KAKAO_REST_API_KEY");
-  assertEnv("KAKAO_REFRESH_TOKEN");
+  const dryRun = process.env.DRY_RUN === "true";
 
   if (process.env.KAKAO_TEST_MESSAGE === "true") {
+    assertEnv("KAKAO_REST_API_KEY");
+    assertEnv("KAKAO_REFRESH_TOKEN");
     await sendKakaoTestMemo();
     console.log("Kakao test message sent successfully.");
     return;
   }
 
-  assertEnv("FIREBASE_SERVICE_ACCOUNT_COIN_F1318");
-
-  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_COIN_F1318);
-  if (!getApps().length) initializeApp({ credential: cert(serviceAccount) });
-
-  const db = getFirestore();
-  await syncEcosystemProjects(db).catch((error) => console.warn(`ecosystem snapshot skipped: ${error.message}`));
+  let db = null;
+  if (!dryRun) {
+    assertEnv("KAKAO_REST_API_KEY");
+    assertEnv("KAKAO_REFRESH_TOKEN");
+    assertEnv("FIREBASE_SERVICE_ACCOUNT_COIN_F1318");
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_COIN_F1318);
+    if (!getApps().length) initializeApp({ credential: cert(serviceAccount) });
+    db = getFirestore();
+    await syncEcosystemProjects(db).catch((error) => console.warn(`ecosystem snapshot skipped: ${error.message}`));
+  }
   const dot = { id: "polkadot", name: "Polkadot", symbol: "DOT", marketCapRank: null, binanceSymbol: "DOTUSDT" };
-  const [candles, ticker24h, context] = await Promise.all([
+  const [candles, ticker24h, context, macro, derivatives, onchain, etf] = await Promise.all([
     fetchBinanceCandles(dot.binanceSymbol, "1d", CANDLE_LIMIT),
     fetchBinanceTicker24h(dot.binanceSymbol),
     fetchDotContext(),
+    fetchMacroInfo(),
+    fetchDerivativesInfo(),
+    fetchOnchainInfo(),
+    fetchEtfInfo(),
   ]);
-  const signals = [calculateSignal(dot, "1d", candles, ticker24h, context)];
+  const signals = [calculateSignal(dot, "1d", candles, ticker24h, context, macro, derivatives, onchain, etf)];
+
+  if (dryRun) {
+    const signal = signals[0];
+    console.log(JSON.stringify({
+      direction: signal.direction,
+      score: signal.score,
+      confidence: signal.confidence,
+      riskLevel: signal.riskLevel,
+      components: signal.components,
+      developmentIndex: signal.developmentIndex,
+      networkHealthy: signal.onchain.networkHealthy,
+      derivatives: signal.derivatives,
+      onchain: signal.onchain,
+      etf: {
+        aum: signal.etf.aum,
+        sharesChange5d: signal.etf.sharesChange5d,
+        premiumDiscount: signal.etf.premiumDiscount,
+      },
+    }, null, 2));
+    return;
+  }
 
   await saveSignals(db, signals);
 
@@ -180,18 +212,187 @@ async function fetchBinanceJson(path) {
   throw new Error(`Binance request failed: ${errors.join(", ")}`);
 }
 
+async function fetchMacroInfo() {
+  const [btcCandles, btcTicker, dotBtcCandles] = await Promise.all([
+    fetchBinanceCandles("BTCUSDT", "1d", 365),
+    fetchBinanceTicker24h("BTCUSDT"),
+    fetchBinanceCandles("DOTBTC", "1d", 30),
+  ]);
+  const btcCloses = btcCandles.map((candle) => candle.close);
+  const dotBtcCloses = dotBtcCandles.map((candle) => candle.close);
+  return {
+    btcChange24h: btcTicker.changePercent,
+    btcEma200: calculateEma(btcCloses, 200),
+    btcPrice: btcTicker.price,
+    dotBtcChange7d: calculatePeriodChange(dotBtcCloses, 7),
+  };
+}
+
+async function fetchFuturesJson(path) {
+  const errors = [];
+  for (const base of ["https://fapi.binance.com", "https://fapi1.binance.com"]) {
+    try {
+      const response = await fetch(`${base}${path}`, { headers: { accept: "application/json" } });
+      if (response.ok) return response.json();
+      errors.push(`${base} ${response.status}`);
+    } catch (error) {
+      errors.push(`${base} ${error.message}`);
+    }
+  }
+  throw new Error(`Binance futures failed: ${errors.join(", ")}`);
+}
+
+async function fetchDerivativesInfo() {
+  const [premium, openInterest, history, ratios] = await Promise.all([
+    fetchFuturesJson("/fapi/v1/premiumIndex?symbol=DOTUSDT"),
+    fetchFuturesJson("/fapi/v1/openInterest?symbol=DOTUSDT"),
+    fetchFuturesJson("/futures/data/openInterestHist?symbol=DOTUSDT&period=1d&limit=2"),
+    fetchFuturesJson("/futures/data/globalLongShortAccountRatio?symbol=DOTUSDT&period=1d&limit=1"),
+  ]);
+  const currentHistory = history.at(-1);
+  const previousHistory = history[0];
+  const currentOpenInterest = Number(openInterest.openInterest);
+  const previousOpenInterest = Number(previousHistory?.sumOpenInterest ?? 0);
+  return {
+    fundingRatePercent: Number(premium.lastFundingRate) * 100,
+    longShortRatio: Number(ratios.at(-1)?.longShortRatio ?? 0),
+    openInterestChange24h: previousOpenInterest ? ((Number(currentHistory?.sumOpenInterest ?? currentOpenInterest) - previousOpenInterest) / previousOpenInterest) * 100 : null,
+    openInterestDot: currentOpenInterest,
+    openInterestUsd: currentOpenInterest * Number(premium.markPrice),
+  };
+}
+
+async function fetchEtfInfo() {
+  const [detailsResponse, historyResponse] = await Promise.all([
+    fetch("https://api.primary.21shares.com/api/product_details/TDOT", { headers: { accept: "application/json" } }),
+    fetch("https://api.primary.21shares.com/api/product_valuation_history/TDOT", { headers: { accept: "application/json" } }),
+  ]);
+  if (!detailsResponse.ok || !historyResponse.ok) throw new Error("TDOT ETF request failed");
+  const details = (await detailsResponse.json()).data;
+  const history = (await historyResponse.json()).data;
+  const latest = history[0];
+  const comparison = history[Math.min(5, history.length - 1)];
+  const average30dVolume = latest?.trading_volume_30d ?? details["30day_trading_volume"];
+  return {
+    aum: latest?.total_nav ?? details.total_nav,
+    aumChange5d: comparison?.total_nav ? (((latest?.total_nav ?? details.total_nav) - comparison.total_nav) / comparison.total_nav) * 100 : null,
+    average30dVolume,
+    dailyVolume: latest?.daily_trading_volume ?? details.daily_trading_volume,
+    dayChange: latest?.market_price_percentage_change ?? 0,
+    dotHoldings: details.constituents?.[0]?.quantity ?? 0,
+    marketPrice: latest?.market_price ?? details.nav_per_unit,
+    nav: latest?.nav_per_share ?? details.nav_per_unit,
+    premiumDiscount: latest?.premium_discount ?? 0,
+    sharesChange5d: comparison?.total_units_outstanding ? (((latest?.total_units_outstanding ?? details.total_units_outstanding) - comparison.total_units_outstanding) / comparison.total_units_outstanding) * 100 : null,
+    sharesOutstanding: latest?.total_units_outstanding ?? details.total_units_outstanding,
+    valuationDate: latest?.valuation_date ?? details.valuation_date,
+    volumeRatio: average30dVolume ? (latest?.daily_trading_volume ?? details.daily_trading_volume) / average30dVolume : null,
+  };
+}
+
+async function fetchOnchainInfo() {
+  const keys = {
+    activeEra: "0x5f3e4907f716ac89b6347d15ececedca487df464e44a534ba6b0cbb32407b587",
+    issuance: "0xc2261276cc9d1f8598ea4b6a74b15c2f57c875e4cff74148e4628f264b974c80",
+    nominators: "0x5f3e4907f716ac89b6347d15ececedcaf99b25852d3d69419882da651375cdb3",
+    referendumCount: "0x0f6738a0ee80c8e74cd2c7417c1e25567f17cdfbfa73331856cca0acddd7842e",
+    totalStakePrefix: "0x5f3e4907f716ac89b6347d15ececedcaa141c4fe67c2d11f4a10c6aca7a79a04",
+    validatorCount: "0x5f3e4907f716ac89b6347d15ececedca138e71612491192d68deab7e6f563fe1",
+  };
+  const activeEraHex = await polkadotRpc("state_getStorage", [keys.activeEra], POLKADOT_ASSET_HUB_RPC_ENDPOINTS);
+  if (!activeEraHex || activeEraHex.length < 10) throw new Error("Active era unavailable");
+  const activeEra = decodeLittleEndianHex(`0x${activeEraHex.slice(2, 10)}`);
+  const totalStakeKey = await storageMapKeyU32(keys.totalStakePrefix, activeEra);
+  const storageKeys = [keys.issuance, keys.validatorCount, keys.nominators, keys.referendumCount, totalStakeKey];
+  const [storageRows, latestBlock, health, bestHeader, finalizedHash] = await Promise.all([
+    polkadotRpc("state_queryStorageAt", [storageKeys], POLKADOT_ASSET_HUB_RPC_ENDPOINTS),
+    polkadotRpc("chain_getBlock"),
+    polkadotRpc("system_health"),
+    polkadotRpc("chain_getHeader"),
+    polkadotRpc("chain_getFinalizedHead"),
+  ]);
+  const finalizedHeader = await polkadotRpc("chain_getHeader", [finalizedHash]);
+  const storage = new Map(storageRows[0]?.changes ?? []);
+  const totalIssuance = decodeLittleEndianHex(storage.get(keys.issuance) ?? null) / 10_000_000_000;
+  const totalStaked = decodeLittleEndianHex(storage.get(totalStakeKey) ?? null) / 10_000_000_000;
+  const bestBlock = Number.parseInt(bestHeader.number, 16);
+  const finalizedBlock = Number.parseInt(finalizedHeader.number, 16);
+  return {
+    activeValidators: decodeLittleEndianHex(storage.get(keys.validatorCount) ?? null),
+    averageExtrinsics: latestBlock.block.extrinsics.length,
+    nominatorCount: decodeLittleEndianHex(storage.get(keys.nominators) ?? null),
+    networkHealthy: !health.isSyncing && bestBlock - finalizedBlock <= 5,
+    recentOngoingReferenda: -1,
+    referendumCount: decodeLittleEndianHex(storage.get(keys.referendumCount) ?? null),
+    stakedPercent: totalIssuance ? (totalStaked / totalIssuance) * 100 : 0,
+    totalIssuance,
+    totalStaked,
+  };
+}
+
+async function polkadotRpc(method, params = [], endpoints = POLKADOT_RELAY_RPC_ENDPOINTS) {
+  const candidates = Array.isArray(endpoints) ? endpoints : [endpoints];
+  const poolKey = candidates.join("|");
+  const preferred = rpcPreferredEndpoint.get(poolKey) ?? 0;
+  const ordered = [...candidates.slice(preferred), ...candidates.slice(0, preferred)];
+  const errors = [];
+  for (const endpoint of ordered) {
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: 1, jsonrpc: "2.0", method, params }),
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (!response.ok) {
+        errors.push(`${new URL(endpoint).hostname} ${response.status}`);
+        continue;
+      }
+      const data = await response.json();
+      if (data.error || data.result === undefined) {
+        errors.push(`${new URL(endpoint).hostname} ${data.error?.message || "invalid response"}`);
+        continue;
+      }
+      rpcPreferredEndpoint.set(poolKey, candidates.indexOf(endpoint));
+      return data.result;
+    } catch (error) {
+      errors.push(`${new URL(endpoint).hostname} ${error.name === "TimeoutError" ? "timeout" : "connection failed"}`);
+    }
+  }
+  throw new Error(`Polkadot RPC failed: ${errors.join(", ")}`);
+}
+
+function decodeLittleEndianHex(value) {
+  if (!value) return 0;
+  const bytes = value.slice(2).match(/.{2}/g) ?? [];
+  return Number(BigInt(`0x${bytes.reverse().join("") || "0"}`));
+}
+
+async function storageMapKeyU32(prefix, value) {
+  const bytes = new Uint8Array(4);
+  new DataView(bytes.buffer).setUint32(0, value, true);
+  const { h64Raw } = await xxhash();
+  const hash = h64Raw(bytes, 0n).toString(16).padStart(16, "0").match(/.{2}/g)?.reverse().join("") ?? "";
+  const encoded = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${prefix}${hash}${encoded}`;
+}
+
 async function fetchDotContext() {
   const repos = ["paritytech/polkadot-sdk", "polkadot-fellows/runtimes", "w3f/polkadot-spec"];
+  const githubHeaders = {
+    accept: "application/vnd.github+json",
+    ...(process.env.GITHUB_TOKEN ? { authorization: `Bearer ${process.env.GITHUB_TOKEN}` } : {}),
+  };
   const [newsResult, repoResults] = await Promise.all([
     fetch("https://min-api.cryptocompare.com/data/v2/news/?lang=EN", { headers: { accept: "application/json" } })
       .then(async (response) => (response.ok ? response.json() : { Data: [] }))
       .catch(() => ({ Data: [] })),
     Promise.all(repos.map(async (repo) => {
       const [commits, releases] = await Promise.all([
-        fetch(`https://api.github.com/repos/${repo}/commits?per_page=4`, { headers: { accept: "application/vnd.github+json" } })
+        fetch(`https://api.github.com/repos/${repo}/commits?per_page=4`, { headers: githubHeaders })
           .then(async (response) => (response.ok ? response.json() : []))
           .catch(() => []),
-        fetch(`https://api.github.com/repos/${repo}/releases?per_page=1`, { headers: { accept: "application/vnd.github+json" } })
+        fetch(`https://api.github.com/repos/${repo}/releases?per_page=1`, { headers: githubHeaders })
           .then(async (response) => (response.ok ? response.json() : []))
           .catch(() => []),
       ]);
@@ -211,15 +412,14 @@ async function fetchDotContext() {
     return date && now - new Date(date).getTime() <= 30 * 86_400_000;
   }).length;
   const developmentIndex = calculateDevelopmentIndex(repoResults, repos.length);
-  const devScore = developmentScore(developmentIndex);
-
-  return { articleCount: articles.length, newsScore, activeRepoCount, developmentIndex, devScore };
+  return { articleCount: articles.length, newsBalance: newsScoreRaw, newsScore, activeRepoCount, developmentIndex };
 }
 
 function calculateDevelopmentIndex(repoResults, repoCount) {
   const now = Date.now();
   const commits = repoResults.flatMap(({ repo, commits: rows }) => rows.map((item) => ({ repo, date: item.commit?.author?.date })));
   const releases = repoResults.flatMap(({ releases: rows }) => rows.map((item) => item.published_at));
+  if (!commits.length && !releases.length) return -1;
   const commits30d = commits.filter((item) => item.date && now - new Date(item.date).getTime() <= 30 * 86_400_000);
   const activeRepos = new Set(commits30d.map((item) => item.repo)).size;
   const latestCommitAt = commits.reduce((latest, item) => Math.max(latest, item.date ? new Date(item.date).getTime() : 0), 0);
@@ -233,15 +433,6 @@ function calculateDevelopmentIndex(repoResults, repoCount) {
   return Math.round(Math.min(100, recencyScore + breadthScore + cadenceScore + releaseScore));
 }
 
-function developmentScore(index) {
-  if (index >= 80) return 12;
-  if (index >= 65) return 8;
-  if (index >= 50) return 3;
-  if (index >= 35) return -3;
-  if (index >= 20) return -8;
-  return -12;
-}
-
 function scoreNewsText(text) {
   const positive = ["adoption", "approve", "approved", "breakthrough", "growth", "launch", "milestone", "partnership", "release", "upgrade"];
   const negative = ["attack", "delay", "exploit", "hack", "lawsuit", "outage", "reject", "risk", "scam", "vulnerability"];
@@ -251,7 +442,7 @@ function scoreNewsText(text) {
   return Math.max(-3, Math.min(3, positiveHits - negativeHits));
 }
 
-function calculateSignal(coin, timeframe, candles, ticker24h, context) {
+function calculateSignal(coin, timeframe, candles, ticker24h, context, macro, derivatives, onchain, etf) {
   const closes = candles.map((candle) => candle.close);
   const volumes = candles.map((candle) => candle.volume);
   const candlePrice = closes.at(-1) ?? 0;
@@ -260,14 +451,44 @@ function calculateSignal(coin, timeframe, candles, ticker24h, context) {
   const rsi = calculateRsi(closes);
   const ema50 = calculateEma(closes, 50);
   const ema200 = calculateEma(closes, 200);
+  const sma20w = calculateSma(closes, 140);
+  const macd = calculateMacd(closes);
+  const atr = calculateAtr(candles);
+  const adx = calculateAdx(candles);
+  const bollinger = calculateBollinger(closes);
   const volumeRatio = ratioToAverage(volumes.at(-1) ?? 0, volumes.slice(-21, -1));
   const dayChangePercent = Number.isFinite(ticker24h.changePercent) ? ticker24h.changePercent : null;
-  const trend = ema50 !== null && ema200 !== null ? (price > ema50 && ema50 > ema200 ? 18 : price < ema50 && ema50 < ema200 ? -18 : 0) : 0;
-  const rsiScore = rsi === null ? 0 : rsi <= 30 ? 14 : rsi >= 70 ? -14 : rsi > 50 ? 6 : -6;
-  const volume = volumeRatio !== null && volumeRatio >= 1.5 ? (price >= previous ? 8 : -8) : 0;
-  const pump = dayChangePercent !== null && dayChangePercent >= PUMP_ALERT_THRESHOLD ? 12 : 0;
-  const score = Math.round(trend + rsiScore + volume + pump + context.newsScore + context.devScore);
-  const direction = score >= BUY_THRESHOLD ? "buy" : score <= SELL_THRESHOLD ? "sell" : "neutral";
+  const change7d = calculatePeriodChange(closes, 7);
+  const trendState = ema50 !== null && ema200 !== null && price > ema50 && ema50 > ema200 ? 1 : ema50 !== null && ema200 !== null && price < ema50 && ema50 < ema200 ? -1 : 0;
+  const btcRegime = macro.btcEma200 ? (macro.btcPrice >= macro.btcEma200 ? 1 : -1) : 0;
+  const result = evaluateDotSignal({
+    above20w: sma20w === null ? null : price >= sma20w,
+    activeValidators: onchain.activeValidators,
+    adx,
+    atrPercent: atr && price ? (atr / price) * 100 : null,
+    bollingerPosition: bollinger.position,
+    btcRegime,
+    change24h: dayChangePercent,
+    change7d,
+    developmentIndex: context.developmentIndex,
+    dotBtcChange7d: macro.dotBtcChange7d,
+    etfDayChange: etf.dayChange,
+    etfPremiumDiscount: etf.premiumDiscount,
+    etfSharesChange5d: etf.sharesChange5d,
+    etfVolumeRatio: etf.volumeRatio,
+    fundingRatePercent: derivatives.fundingRatePercent,
+    longShortRatio: derivatives.longShortRatio,
+    macdHistogram: macd.histogram,
+    networkHealthy: onchain.networkHealthy,
+    newsBalance: context.newsBalance,
+    openInterestChange24h: derivatives.openInterestChange24h,
+    priceUp: price >= previous,
+    rsi,
+    stakedPercent: onchain.stakedPercent,
+    trendState,
+    volumeRatio,
+  });
+  const direction = result.direction === "risk" ? "sell" : result.direction;
 
   return {
     symbol: coin.binanceSymbol,
@@ -277,28 +498,25 @@ function calculateSignal(coin, timeframe, candles, ticker24h, context) {
     marketCapRank: coin.marketCapRank,
     timeframe,
     direction,
-    score,
-    reason: explainSignal(direction, {
-      trend,
-      rsi: rsiScore,
-      volume,
-      pump,
-      news: context.newsScore,
-      development: context.devScore,
-    }),
+    score: result.score,
+    confidence: result.confidence,
+    riskLevel: result.riskLevel,
+    reason: result.reasons.slice(0, 6).join(" · "),
     price,
     dayChangePercent,
     rsi,
-    macd: null,
-    macdSignal: null,
-    macdHistogram: null,
+    macd: macd.macd,
+    macdSignal: macd.signal,
+    macdHistogram: macd.histogram,
     ema50,
     ema200,
     stochasticK: null,
     stochasticD: null,
     cci: null,
-    atrPercent: null,
-    bollingerPosition: null,
+    atrPercent: atr && price ? (atr / price) * 100 : null,
+    adx,
+    bollingerPosition: bollinger.position,
+    bollingerWidthPercent: bollinger.widthPercent,
     volumeRatio,
     obvSlope: null,
     candles: closes.slice(-365),
@@ -307,7 +525,11 @@ function calculateSignal(coin, timeframe, candles, ticker24h, context) {
     newsArticleCount: context.articleCount,
     activeDevRepos: context.activeRepoCount,
     developmentIndex: context.developmentIndex,
-    components: { trend, rsi: rsiScore, volume, pump, news: context.newsScore, development: context.devScore },
+    components: result.components,
+    macro,
+    derivatives,
+    onchain,
+    etf,
   };
 }
 
@@ -360,6 +582,7 @@ async function sendKakaoMemo(signal, alertType = "signal", previousScore = null)
       : signal.reason;
   const message = `[${label}] ${asset} ${signal.timeframe}
 점수: ${signal.score}
+신뢰도: ${signal.confidence}% · 변동 위험: ${signal.riskLevel === "high" ? "높음" : signal.riskLevel === "medium" ? "보통" : "낮음"}
 가격: ${signal.price.toLocaleString("ko-KR", { maximumFractionDigits: 6 })} USDT
 시총 순위: ${signal.marketCapRank ? `#${signal.marketCapRank}` : "대시보드 확인"}
 개발 지수: ${signal.developmentIndex}/100
@@ -425,25 +648,6 @@ async function refreshKakaoAccessToken() {
   return data.access_token;
 }
 
-function explainSignal(direction, components) {
-  const labels = {
-    trend: "장기 추세",
-    rsi: "RSI",
-    volume: "거래량",
-    pump: "24시간 급등",
-    news: "뉴스",
-    development: "개발 활동",
-  };
-  const base = Object.entries(components)
-    .filter(([, value]) => value !== 0)
-    .sort((left, right) => Math.abs(right[1]) - Math.abs(left[1]))
-    .map(([key, value]) => `${labels[key] ?? key} ${value > 0 ? "+" : ""}${value}`)
-    .join(", ");
-  if (direction === "buy") return `매수 점수 우위: ${base}`;
-  if (direction === "sell") return `하락 위험 점수 우위: ${base}`;
-  return `중립: ${base || "뚜렷한 우위 없음"}`;
-}
-
 function calculateRsi(closes, period = 14) {
   if (closes.length <= period) return null;
   let gain = 0;
@@ -472,6 +676,80 @@ function calculateEma(values, period) {
     ema = (values[index] - ema) * multiplier + ema;
   }
   return ema;
+}
+
+function calculateSma(values, period) {
+  return values.length < period ? null : average(values.slice(-period));
+}
+
+function calculateMacd(closes) {
+  if (closes.length < 35) return { macd: null, signal: null, histogram: null };
+  const series = [];
+  for (let end = 26; end <= closes.length; end += 1) {
+    const values = closes.slice(0, end);
+    const ema12 = calculateEma(values, 12);
+    const ema26 = calculateEma(values, 26);
+    if (ema12 !== null && ema26 !== null) series.push(ema12 - ema26);
+  }
+  const macd = series.at(-1) ?? null;
+  const signal = calculateEma(series, 9);
+  return { macd, signal, histogram: macd !== null && signal !== null ? macd - signal : null };
+}
+
+function calculatePeriodChange(values, days) {
+  if (values.length <= days) return null;
+  const current = values.at(-1);
+  const previous = values.at(-1 - days);
+  return previous ? ((current - previous) / previous) * 100 : null;
+}
+
+function calculateAtr(candles, period = 14) {
+  if (candles.length <= period) return null;
+  const ranges = candles.slice(1).map((candle, index) => {
+    const previousClose = candles[index].close;
+    return Math.max(candle.high - candle.low, Math.abs(candle.high - previousClose), Math.abs(candle.low - previousClose));
+  });
+  let atr = average(ranges.slice(0, period));
+  for (let index = period; index < ranges.length; index += 1) atr = (atr * (period - 1) + ranges[index]) / period;
+  return atr;
+}
+
+function calculateAdx(candles, period = 14) {
+  if (candles.length < period * 2 + 1) return null;
+  const trueRanges = [];
+  const plusDm = [];
+  const minusDm = [];
+  for (let index = 1; index < candles.length; index += 1) {
+    const current = candles[index];
+    const previous = candles[index - 1];
+    const upMove = current.high - previous.high;
+    const downMove = previous.low - current.low;
+    trueRanges.push(Math.max(current.high - current.low, Math.abs(current.high - previous.close), Math.abs(current.low - previous.close)));
+    plusDm.push(upMove > downMove && upMove > 0 ? upMove : 0);
+    minusDm.push(downMove > upMove && downMove > 0 ? downMove : 0);
+  }
+  const dxValues = [];
+  for (let end = period; end <= trueRanges.length; end += 1) {
+    const atr = average(trueRanges.slice(end - period, end));
+    if (!atr) continue;
+    const plusDi = (average(plusDm.slice(end - period, end)) / atr) * 100;
+    const minusDi = (average(minusDm.slice(end - period, end)) / atr) * 100;
+    if (plusDi + minusDi) dxValues.push((Math.abs(plusDi - minusDi) / (plusDi + minusDi)) * 100);
+  }
+  return dxValues.length >= period ? average(dxValues.slice(-period)) : null;
+}
+
+function calculateBollinger(closes, period = 20, multiplier = 2) {
+  if (closes.length < period) return { position: null, widthPercent: null };
+  const values = closes.slice(-period);
+  const middle = average(values);
+  const deviation = Math.sqrt(average(values.map((value) => (value - middle) ** 2)));
+  const upper = middle + deviation * multiplier;
+  const lower = middle - deviation * multiplier;
+  return {
+    position: upper === lower ? 0.5 : (closes.at(-1) - lower) / (upper - lower),
+    widthPercent: middle ? ((upper - lower) / middle) * 100 : null,
+  };
 }
 
 function ratioToAverage(value, values) {

@@ -14,7 +14,8 @@
   },
   "dependencies": {
     "firebase-admin": "^13.0.2",
-    "firebase-functions": "^6.3.2"
+    "firebase-functions": "^6.3.2",
+    "xxhash-wasm": "^1.1.0"
   },
   "devDependencies": {
     "typescript": "^5.7.2"

@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Activity, ArrowDownRight, ArrowUpRight, Code2, Coins, ExternalLink, Landmark, Network, Newspaper, RefreshCw, ShieldCheck, TrendingUp } from "lucide-react";
+import xxhash from "xxhash-wasm";
+import { evaluateDotSignal } from "./signal-model.mjs";
 
 const SYMBOL = "DOTUSDT";
 const DEV_REPOS = [
@@ -15,6 +17,9 @@ const CHART_RANGES = [
   { label: "1년", value: "1y", days: 365 },
 ] as const;
 const BINANCE_BASES = ["https://data-api.binance.vision", "https://api.binance.com", "https://api1.binance.com"];
+const POLKADOT_RELAY_RPC_ENDPOINTS = ["https://rpc.polkadot.io", "https://polkadot-rpc.publicnode.com"];
+const POLKADOT_ASSET_HUB_RPC_ENDPOINTS = ["https://polkadot-asset-hub-rpc.polkadot.io", "https://asset-hub.polkadot.rpc.deserve.network"];
+const rpcPreferredEndpoint = new Map<string, number>();
 const STABLE_SYMBOLS = new Set([
   "USDT", "USDC", "USDS", "DAI", "FDUSD", "TUSD", "USDE", "USDD", "USDP", "PYUSD", "USD1", "GUSD", "FRAX", "LUSD", "SUSD", "BUSD",
   "RLUSD", "USD0", "USDY", "USYC", "USUALUSD", "USDTB", "SUSDS", "SUSDE", "EURC", "EURS", "EURT", "EURI", "AEUR", "EURCV",
@@ -36,6 +41,9 @@ interface DotSignal {
   label: string;
   score: number;
   developmentIndex: number;
+  confidence: number;
+  riskLevel: "low" | "medium" | "high" | "unknown";
+  components: Record<string, number>;
   reasons: string[];
 }
 
@@ -75,6 +83,51 @@ interface NetworkInfo {
   bestBlock: number;
   finalizedBlock: number;
   runtimeVersion: number;
+}
+
+interface MacroInfo {
+  btcPrice: number;
+  btcEma200: number | null;
+  btcChange24h: number;
+  dotBtcChange7d: number | null;
+}
+
+interface DerivativesInfo {
+  fundingRatePercent: number;
+  openInterestDot: number;
+  openInterestUsd: number;
+  openInterestChange24h: number | null;
+  longShortRatio: number;
+}
+
+interface OnchainInfo {
+  totalIssuance: number;
+  totalStaked: number;
+  stakedPercent: number;
+  activeValidators: number;
+  nominatorCount: number;
+  referendumCount: number;
+  recentOngoingReferenda: number;
+  averageExtrinsics: number;
+  cached?: boolean;
+  updatedAt?: string;
+}
+
+interface EtfInfo {
+  aum: number;
+  nav: number;
+  marketPrice: number;
+  sharesOutstanding: number;
+  dotHoldings: number;
+  dayChange: number;
+  monthChange: number;
+  premiumDiscount: number;
+  dailyVolume: number;
+  average30dVolume: number;
+  volumeRatio: number | null;
+  sharesChange5d: number | null;
+  aumChange5d: number | null;
+  valuationDate: string;
 }
 
 interface EcosystemProject {
@@ -190,6 +243,60 @@ function calculateMacd(closes: number[]) {
   return { macd, signal, histogram: macd !== null && signal !== null ? macd - signal : null };
 }
 
+function calculateAtr(candles: Candle[], period = 14) {
+  if (candles.length <= period) return null;
+  const ranges = candles.slice(1).map((candle, index) => {
+    const previousClose = candles[index].close;
+    return Math.max(candle.high - candle.low, Math.abs(candle.high - previousClose), Math.abs(candle.low - previousClose));
+  });
+  let atr = average(ranges.slice(0, period));
+  for (let index = period; index < ranges.length; index += 1) atr = (atr * (period - 1) + ranges[index]) / period;
+  return atr;
+}
+
+function calculateAdx(candles: Candle[], period = 14) {
+  if (candles.length < period * 2 + 1) return null;
+  const trueRanges: number[] = [];
+  const plusDm: number[] = [];
+  const minusDm: number[] = [];
+  for (let index = 1; index < candles.length; index += 1) {
+    const current = candles[index];
+    const previous = candles[index - 1];
+    const upMove = current.high - previous.high;
+    const downMove = previous.low - current.low;
+    trueRanges.push(Math.max(current.high - current.low, Math.abs(current.high - previous.close), Math.abs(current.low - previous.close)));
+    plusDm.push(upMove > downMove && upMove > 0 ? upMove : 0);
+    minusDm.push(downMove > upMove && downMove > 0 ? downMove : 0);
+  }
+  const dxValues: number[] = [];
+  for (let end = period; end <= trueRanges.length; end += 1) {
+    const atr = average(trueRanges.slice(end - period, end));
+    if (!atr) continue;
+    const plusDi = (average(plusDm.slice(end - period, end)) / atr) * 100;
+    const minusDi = (average(minusDm.slice(end - period, end)) / atr) * 100;
+    const total = plusDi + minusDi;
+    if (total) dxValues.push((Math.abs(plusDi - minusDi) / total) * 100);
+  }
+  return dxValues.length >= period ? average(dxValues.slice(-period)) : null;
+}
+
+function calculateBollinger(closes: number[], period = 20, multiplier = 2) {
+  if (closes.length < period) return { lower: null, middle: null, position: null, upper: null, widthPercent: null };
+  const values = closes.slice(-period);
+  const middle = average(values);
+  const deviation = Math.sqrt(average(values.map((value) => (value - middle) ** 2)));
+  const upper = middle + deviation * multiplier;
+  const lower = middle - deviation * multiplier;
+  const current = closes[closes.length - 1];
+  return {
+    lower,
+    middle,
+    position: upper === lower ? 0.5 : (current - lower) / (upper - lower),
+    upper,
+    widthPercent: middle ? ((upper - lower) / middle) * 100 : null,
+  };
+}
+
 function calculatePeriodChange(closes: number[], days: number) {
   if (closes.length <= days) return null;
   const current = closes[closes.length - 1];
@@ -273,15 +380,6 @@ function calculateDevelopmentIndex(devItems: DevItem[]) {
   return Math.round(Math.min(100, recencyScore + breadthScore + cadenceScore + releaseScore));
 }
 
-function developmentScore(index: number) {
-  if (index >= 80) return 12;
-  if (index >= 65) return 8;
-  if (index >= 50) return 3;
-  if (index >= 35) return -3;
-  if (index >= 20) return -8;
-  return -12;
-}
-
 function developmentLabel(index: number) {
   if (index >= 70) return "개발 매우 활발";
   if (index >= 40) return "개발 정상 진행";
@@ -289,10 +387,24 @@ function developmentLabel(index: number) {
   return "개발 장기 정체";
 }
 
-function buildSignal(candles: Candle[], change24h: number | null, change7d: number | null, news: NewsItem[], devItems: DevItem[], networkInfo: NetworkInfo | null): DotSignal {
+function buildSignal(
+  candles: Candle[],
+  currentPrice: number | null,
+  change24h: number | null,
+  change7d: number | null,
+  news: NewsItem[],
+  devItems: DevItem[],
+  networkInfo: NetworkInfo | null,
+  macroInfo: MacroInfo | null,
+  derivativesInfo: DerivativesInfo | null,
+  onchainInfo: OnchainInfo | null,
+  etfInfo: EtfInfo | null,
+  storedDevelopmentIndex: number | null,
+): DotSignal {
   const closes = candles.map((candle) => candle.close);
   const volumes = candles.map((candle) => candle.volume);
-  const price = closes[closes.length - 1] ?? 0;
+  const candlePrice = closes[closes.length - 1] ?? 0;
+  const price = currentPrice ?? candlePrice;
   const previous = closes[closes.length - 2] ?? price;
   const rsi = calculateRsi(closes);
   const ema50 = calculateEma(closes, 50);
@@ -300,113 +412,43 @@ function buildSignal(candles: Candle[], change24h: number | null, change7d: numb
   const sma20w = calculateSma(closes, 140);
   const { histogram } = calculateMacd(closes);
   const volumeRatio = average(volumes.slice(-21, -1)) ? (volumes[volumes.length - 1] ?? 0) / average(volumes.slice(-21, -1)) : null;
-  const reasons: string[] = [];
-  let score = 0;
-
-  if (rsi !== null) {
-    if (rsi <= 30) {
-      score += 22;
-      reasons.push(`RSI ${formatNumber(rsi)}: 과매도 구간이라 반등 후보`);
-    } else if (rsi >= 70) {
-      score -= 22;
-      reasons.push(`RSI ${formatNumber(rsi)}: 과열 구간이라 추격 매수 위험`);
-    } else {
-      reasons.push(`RSI ${formatNumber(rsi)}: 중립 구간`);
-    }
-  }
-
-  if (ema50 !== null && ema200 !== null) {
-    if (price > ema50 && ema50 > ema200) {
-      score += 20;
-      reasons.push("50일 추세선이 200일 추세선 위이고 현재가도 위라 장기 상승 흐름");
-    } else if (price < ema50 && ema50 < ema200) {
-      score -= 20;
-      reasons.push("50일 추세선이 200일 추세선 아래이고 현재가도 아래라 장기 하락 흐름");
-    } else {
-      reasons.push("50일·200일 추세선이 엇갈려 장기 방향이 아직 불분명");
-    }
-  }
-
-  if (sma20w !== null) {
-    if (price > sma20w) {
-      score += 12;
-      reasons.push(`현재가가 20주 평균선 ${formatUsdt(sma20w)} USDT 위`);
-    } else {
-      score -= 12;
-      reasons.push(`현재가가 20주 평균선 ${formatUsdt(sma20w)} USDT 아래`);
-    }
-  }
-
-  if (histogram !== null) {
-    if (histogram > 0) {
-      score += 10;
-      reasons.push("단기 상승 힘이 하락 힘보다 강해지는 중");
-    } else {
-      score -= 10;
-      reasons.push("단기 하락 힘이 상승 힘보다 강한 상태");
-    }
-  }
-
-  if (volumeRatio !== null && volumeRatio >= 1.5) {
-    score += price >= previous ? 10 : -10;
-    reasons.push(`거래량이 20일 평균의 ${formatNumber(volumeRatio)}배로 커짐`);
-  }
-
-  if (change24h !== null) {
-    if (change24h >= 10) {
-      score += 8;
-      reasons.push("24시간 10% 이상 상승: 강한 수급 유입");
-    } else if (change24h <= -8) {
-      score -= 8;
-      reasons.push("24시간 낙폭이 커서 단기 하락 위험");
-    }
-  }
-
-  if (change7d !== null) {
-    if (change7d > 8) {
-      score += 6;
-      reasons.push(`Binance 7일 수익률 ${formatPercent(change7d)}: 단기 추세 강함`);
-    } else if (change7d < -8) {
-      score -= 6;
-      reasons.push(`Binance 7일 수익률 ${formatPercent(change7d)}: 단기 약세`);
-    }
-  }
-
-  const scoredNews = news.filter((item) => item.sentiment !== 0);
-  const newsBalance = scoredNews.reduce((sum, item) => sum + item.sentiment, 0);
-  if (newsBalance >= 2) {
-    score += Math.min(12, 4 + newsBalance * 2);
-    reasons.push(`DOT 뉴스 ${news.length}건 중 긍정 재료 우세: 전망에 가점`);
-  } else if (newsBalance <= -2) {
-    score -= Math.min(12, 4 + Math.abs(newsBalance) * 2);
-    reasons.push(`DOT 뉴스 ${news.length}건 중 부정 재료 우세: 전망에 감점`);
-  } else {
-    reasons.push(`DOT 뉴스 ${news.length}건: 뚜렷한 긍정·부정 우위 없음`);
-  }
-
-  const developmentIndex = calculateDevelopmentIndex(devItems);
-  const developmentContribution = developmentScore(developmentIndex);
-  score += developmentContribution;
-  reasons.push(`개발 지수 ${developmentIndex}점 · ${developmentLabel(developmentIndex)}: 종합점수 ${developmentContribution > 0 ? "+" : ""}${developmentContribution}`);
-
-  if (networkInfo) {
-    const finalityGap = networkInfo.bestBlock - networkInfo.finalizedBlock;
-    if (networkInfo.syncing || finalityGap > 5) {
-      score -= 12;
-      reasons.push(`네트워크 확정 지연 ${formatNumber(finalityGap, 0)}블록: 운영 위험 감점`);
-    } else {
-      score += 2;
-      reasons.push(`네트워크 정상: 최신 블록과 확정 블록 차이 ${formatNumber(finalityGap, 0)}개`);
-    }
-  }
-
-  const direction: SignalDirection = score >= 35 ? "buy" : score <= -35 ? "risk" : "neutral";
-  return {
-    direction,
-    score: Math.round(score),
+  const bollinger = calculateBollinger(closes);
+  const atr = calculateAtr(candles);
+  const adx = calculateAdx(candles);
+  const developmentIndex = devItems.length ? calculateDevelopmentIndex(devItems) : storedDevelopmentIndex ?? -1;
+  const trendState: -1 | 0 | 1 = ema50 !== null && ema200 !== null && price > ema50 && ema50 > ema200 ? 1 : ema50 !== null && ema200 !== null && price < ema50 && ema50 < ema200 ? -1 : 0;
+  const btcRegime: -1 | 0 | 1 = macroInfo?.btcEma200 ? (macroInfo.btcPrice >= macroInfo.btcEma200 ? 1 : -1) : 0;
+  const result = evaluateDotSignal({
+    above20w: sma20w === null ? null : price >= sma20w,
+    activeValidators: onchainInfo?.activeValidators ?? null,
+    adx,
+    atrPercent: atr && price ? (atr / price) * 100 : null,
+    bollingerPosition: bollinger.position,
+    btcRegime,
+    change24h,
+    change7d,
     developmentIndex,
-    label: direction === "buy" ? "매수" : direction === "risk" ? "매도" : "관망",
-    reasons,
+    dotBtcChange7d: macroInfo?.dotBtcChange7d ?? null,
+    etfDayChange: etfInfo?.dayChange ?? null,
+    etfPremiumDiscount: etfInfo?.premiumDiscount ?? null,
+    etfSharesChange5d: etfInfo?.sharesChange5d ?? null,
+    etfVolumeRatio: etfInfo?.volumeRatio ?? null,
+    fundingRatePercent: derivativesInfo?.fundingRatePercent ?? null,
+    longShortRatio: derivativesInfo?.longShortRatio ?? null,
+    macdHistogram: histogram,
+    networkHealthy: networkInfo ? !networkInfo.syncing && networkInfo.bestBlock - networkInfo.finalizedBlock <= 5 : null,
+    newsBalance: news.reduce((sum, item) => sum + item.sentiment, 0),
+    openInterestChange24h: derivativesInfo?.openInterestChange24h ?? null,
+    priceUp: price >= previous,
+    rsi,
+    stakedPercent: onchainInfo?.stakedPercent ?? null,
+    trendState,
+    volumeRatio,
+  });
+  return {
+    ...result,
+    developmentIndex,
+    label: result.direction === "buy" ? "매수" : result.direction === "risk" ? "매도" : "관망",
   };
 }
 
@@ -441,6 +483,154 @@ async function fetchTicker24h() {
   };
 }
 
+async function fetchMacroInfo(): Promise<MacroInfo> {
+  const [btcRows, btcTicker, dotBtcRows] = await Promise.all([
+    fetchBinanceJson("/api/v3/klines?symbol=BTCUSDT&interval=1d&limit=365") as Promise<Array<[number, string, string, string, string]>>,
+    fetchBinanceJson("/api/v3/ticker/24hr?symbol=BTCUSDT") as Promise<{ lastPrice: string; priceChangePercent: string }>,
+    fetchBinanceJson("/api/v3/klines?symbol=DOTBTC&interval=1d&limit=30") as Promise<Array<[number, string, string, string, string]>>,
+  ]);
+  const btcCloses = btcRows.map((row) => Number(row[4]));
+  const dotBtcCloses = dotBtcRows.map((row) => Number(row[4]));
+  return {
+    btcChange24h: Number(btcTicker.priceChangePercent),
+    btcEma200: calculateEma(btcCloses, 200),
+    btcPrice: Number(btcTicker.lastPrice),
+    dotBtcChange7d: calculatePeriodChange(dotBtcCloses, 7),
+  };
+}
+
+async function fetchFuturesJson<T>(path: string): Promise<T> {
+  const bases = ["https://fapi.binance.com", "https://fapi1.binance.com"];
+  for (const base of bases) {
+    try {
+      const response = await fetch(`${base}${path}`, { headers: { accept: "application/json" } });
+      if (response.ok) return (await response.json()) as T;
+    } catch {
+      // Try the next Binance futures endpoint.
+    }
+  }
+  throw new Error("Binance 선물 데이터를 불러오지 못했습니다.");
+}
+
+async function fetchDerivativesInfo(): Promise<DerivativesInfo> {
+  const [premium, openInterest, history, ratios] = await Promise.all([
+    fetchFuturesJson<{ lastFundingRate: string; markPrice: string }>("/fapi/v1/premiumIndex?symbol=DOTUSDT"),
+    fetchFuturesJson<{ openInterest: string }>("/fapi/v1/openInterest?symbol=DOTUSDT"),
+    fetchFuturesJson<Array<{ sumOpenInterest: string; sumOpenInterestValue: string }>>("/futures/data/openInterestHist?symbol=DOTUSDT&period=1d&limit=2"),
+    fetchFuturesJson<Array<{ longShortRatio: string }>>("/futures/data/globalLongShortAccountRatio?symbol=DOTUSDT&period=1d&limit=1"),
+  ]);
+  const currentHistory = history[history.length - 1];
+  const previousHistory = history[0];
+  const currentOpenInterest = Number(openInterest.openInterest);
+  const previousOpenInterest = Number(previousHistory?.sumOpenInterest ?? 0);
+  return {
+    fundingRatePercent: Number(premium.lastFundingRate) * 100,
+    longShortRatio: Number(ratios[ratios.length - 1]?.longShortRatio ?? 0),
+    openInterestChange24h: previousOpenInterest ? ((Number(currentHistory?.sumOpenInterest ?? currentOpenInterest) - previousOpenInterest) / previousOpenInterest) * 100 : null,
+    openInterestDot: currentOpenInterest,
+    openInterestUsd: currentOpenInterest * Number(premium.markPrice),
+  };
+}
+
+async function fetchEtfInfo(): Promise<EtfInfo> {
+  const [detailsResponse, historyResponse] = await Promise.all([
+    fetch("https://api.primary.21shares.com/api/product_details/TDOT", { headers: { accept: "application/json" } }),
+    fetch("https://api.primary.21shares.com/api/product_valuation_history/TDOT", { headers: { accept: "application/json" } }),
+  ]);
+  if (!detailsResponse.ok || !historyResponse.ok) throw new Error("TDOT ETF 데이터를 불러오지 못했습니다.");
+  const details = (await detailsResponse.json()) as {
+    data: {
+      total_nav: number;
+      nav_per_unit: number;
+      total_units_outstanding: number;
+      valuation_date: string;
+      daily_trading_volume: number;
+      "30day_trading_volume": number;
+      constituents: Array<{ quantity: number }>;
+    };
+  };
+  const history = (await historyResponse.json()) as {
+    data: Array<{
+      total_nav: number;
+      total_units_outstanding: number;
+      nav_per_share: number;
+      market_price: number;
+      market_price_percentage_change: number;
+      premium_discount: number;
+      daily_trading_volume: number;
+      trading_volume_30d: number;
+      valuation_date: string;
+    }>;
+  };
+  const latest = history.data[0];
+  const comparison = history.data[Math.min(5, history.data.length - 1)];
+  const average30dVolume = latest?.trading_volume_30d ?? details.data["30day_trading_volume"];
+  return {
+    aum: latest?.total_nav ?? details.data.total_nav,
+    aumChange5d: comparison?.total_nav ? (((latest?.total_nav ?? details.data.total_nav) - comparison.total_nav) / comparison.total_nav) * 100 : null,
+    average30dVolume,
+    dailyVolume: latest?.daily_trading_volume ?? details.data.daily_trading_volume,
+    dayChange: latest?.market_price_percentage_change ?? 0,
+    dotHoldings: details.data.constituents[0]?.quantity ?? 0,
+    marketPrice: latest?.market_price ?? details.data.nav_per_unit,
+    monthChange: history.data.length > 20 && history.data[20].market_price ? ((latest.market_price - history.data[20].market_price) / history.data[20].market_price) * 100 : 0,
+    nav: latest?.nav_per_share ?? details.data.nav_per_unit,
+    premiumDiscount: latest?.premium_discount ?? 0,
+    sharesChange5d: comparison?.total_units_outstanding ? (((latest?.total_units_outstanding ?? details.data.total_units_outstanding) - comparison.total_units_outstanding) / comparison.total_units_outstanding) * 100 : null,
+    sharesOutstanding: latest?.total_units_outstanding ?? details.data.total_units_outstanding,
+    valuationDate: latest?.valuation_date ?? details.data.valuation_date,
+    volumeRatio: average30dVolume ? (latest?.daily_trading_volume ?? details.data.daily_trading_volume) / average30dVolume : null,
+  };
+}
+
+async function fetchOnchainInfo(): Promise<OnchainInfo> {
+  try {
+    return await fetchLiveOnchainInfo();
+  } catch (error) {
+    const cached = await fetchStoredOnchainInfo().catch(() => null);
+    if (cached) return cached;
+    throw error;
+  }
+}
+
+async function fetchLiveOnchainInfo(): Promise<OnchainInfo> {
+  const keys = {
+    activeEra: "0x5f3e4907f716ac89b6347d15ececedca487df464e44a534ba6b0cbb32407b587",
+    issuance: "0xc2261276cc9d1f8598ea4b6a74b15c2f57c875e4cff74148e4628f264b974c80",
+    nominators: "0x5f3e4907f716ac89b6347d15ececedcaf99b25852d3d69419882da651375cdb3",
+    referendumCount: "0x0f6738a0ee80c8e74cd2c7417c1e25567f17cdfbfa73331856cca0acddd7842e",
+    totalStakePrefix: "0x5f3e4907f716ac89b6347d15ececedcaa141c4fe67c2d11f4a10c6aca7a79a04",
+    validatorCount: "0x5f3e4907f716ac89b6347d15ececedca138e71612491192d68deab7e6f563fe1",
+  };
+  const activeEraHex = await polkadotRpc<string | null>("state_getStorage", [keys.activeEra], POLKADOT_ASSET_HUB_RPC_ENDPOINTS);
+  if (!activeEraHex || activeEraHex.length < 10) throw new Error("활성 era를 확인하지 못했습니다.");
+  const activeEra = decodeLittleEndianHex(`0x${activeEraHex.slice(2, 10)}`);
+  const totalStakeKey = await storageMapKeyU32(keys.totalStakePrefix, activeEra);
+  const storageKeys = [keys.issuance, keys.validatorCount, keys.nominators, keys.referendumCount, totalStakeKey];
+  const [storageRows, latestBlock] = await Promise.all([
+    polkadotRpc<Array<{ changes: Array<[string, string | null]> }>>("state_queryStorageAt", [storageKeys], POLKADOT_ASSET_HUB_RPC_ENDPOINTS),
+    polkadotRpc<{ block: { extrinsics: string[] } }>("chain_getBlock"),
+  ]);
+  const storage = new Map(storageRows[0]?.changes ?? []);
+  const issuanceHex = storage.get(keys.issuance) ?? null;
+  const validatorHex = storage.get(keys.validatorCount) ?? null;
+  const nominatorHex = storage.get(keys.nominators) ?? null;
+  const referendumCountHex = storage.get(keys.referendumCount) ?? null;
+  const totalStakeHex = storage.get(totalStakeKey) ?? null;
+  const totalIssuance = decodeLittleEndianHex(issuanceHex) / 10_000_000_000;
+  const totalStaked = decodeLittleEndianHex(totalStakeHex) / 10_000_000_000;
+  return {
+    activeValidators: decodeLittleEndianHex(validatorHex),
+    averageExtrinsics: latestBlock.block.extrinsics.length,
+    nominatorCount: decodeLittleEndianHex(nominatorHex),
+    recentOngoingReferenda: -1,
+    referendumCount: decodeLittleEndianHex(referendumCountHex),
+    stakedPercent: totalIssuance ? (totalStaked / totalIssuance) * 100 : 0,
+    totalIssuance,
+    totalStaked,
+  };
+}
+
 async function fetchUsdKrw(): Promise<FxRate> {
   const sources = [
     {
@@ -472,16 +662,55 @@ async function fetchUsdKrw(): Promise<FxRate> {
   throw new Error("USD/KRW 환율을 불러오지 못했습니다.");
 }
 
-async function polkadotRpc<T>(method: string, params: unknown[] = []): Promise<T> {
-  const response = await fetch("https://rpc.polkadot.io", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ id: 1, jsonrpc: "2.0", method, params }),
-  });
-  if (!response.ok) throw new Error(`Polkadot RPC 요청 실패: ${response.status}`);
-  const data = (await response.json()) as { result?: T; error?: { message?: string } };
-  if (data.error || data.result === undefined) throw new Error(data.error?.message || `${method} 응답 오류`);
-  return data.result;
+async function polkadotRpc<T>(method: string, params: unknown[] = [], endpoints: string | string[] = POLKADOT_RELAY_RPC_ENDPOINTS): Promise<T> {
+  const candidates = Array.isArray(endpoints) ? endpoints : [endpoints];
+  const poolKey = candidates.join("|");
+  const preferred = rpcPreferredEndpoint.get(poolKey) ?? 0;
+  const ordered = [...candidates.slice(preferred), ...candidates.slice(0, preferred)];
+  const errors: string[] = [];
+
+  for (const endpoint of ordered) {
+    try {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 8_000);
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: 1, jsonrpc: "2.0", method, params }),
+        signal: controller.signal,
+      });
+      window.clearTimeout(timeout);
+      if (!response.ok) {
+        errors.push(`${new URL(endpoint).hostname} ${response.status}`);
+        continue;
+      }
+      const data = (await response.json()) as { result?: T; error?: { message?: string } };
+      if (data.error || data.result === undefined) {
+        errors.push(`${new URL(endpoint).hostname} ${data.error?.message || "응답 오류"}`);
+        continue;
+      }
+      rpcPreferredEndpoint.set(poolKey, candidates.indexOf(endpoint));
+      return data.result;
+    } catch (error) {
+      errors.push(`${new URL(endpoint).hostname} ${error instanceof Error && error.name === "AbortError" ? "시간 초과" : "연결 실패"}`);
+    }
+  }
+  throw new Error(`Polkadot RPC 요청 실패: ${errors.join(", ")}`);
+}
+
+function decodeLittleEndianHex(value: string | null) {
+  if (!value) return 0;
+  const bytes = value.slice(2).match(/.{2}/g) ?? [];
+  return Number(BigInt(`0x${bytes.reverse().join("") || "0"}`));
+}
+
+async function storageMapKeyU32(prefix: string, value: number) {
+  const bytes = new Uint8Array(4);
+  new DataView(bytes.buffer).setUint32(0, value, true);
+  const { h64Raw } = await xxhash();
+  const hash = h64Raw(bytes, 0n).toString(16).padStart(16, "0").match(/.{2}/g)?.reverse().join("") ?? "";
+  const encoded = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${prefix}${hash}${encoded}`;
 }
 
 async function fetchNetworkInfo(): Promise<NetworkInfo> {
@@ -701,6 +930,44 @@ async function fetchDevStatus(): Promise<DevItem[]> {
     .slice(0, 15);
 }
 
+async function fetchStoredDevelopmentIndex() {
+  const [{ doc, getDoc }, { db }] = await Promise.all([import("firebase/firestore"), import("./firebase")]);
+  if (!db) return null;
+  const snapshot = await getDoc(doc(db, "signals", "DOTUSDT_1d"));
+  const value = Number(snapshot.data()?.developmentIndex);
+  return Number.isFinite(value) ? value : null;
+}
+
+async function fetchStoredOnchainInfo(): Promise<OnchainInfo | null> {
+  const [{ doc, getDoc }, { db }] = await Promise.all([import("firebase/firestore"), import("./firebase")]);
+  if (!db) return null;
+  const snapshot = await getDoc(doc(db, "signals", "DOTUSDT_1d"));
+  const data = snapshot.data();
+  const onchain = data?.onchain as Partial<OnchainInfo> | undefined;
+  const required = [
+    onchain?.totalIssuance,
+    onchain?.totalStaked,
+    onchain?.stakedPercent,
+    onchain?.activeValidators,
+    onchain?.nominatorCount,
+    onchain?.referendumCount,
+    onchain?.averageExtrinsics,
+  ];
+  if (!onchain || required.some((value) => !Number.isFinite(value))) return null;
+  return {
+    totalIssuance: Number(onchain.totalIssuance),
+    totalStaked: Number(onchain.totalStaked),
+    stakedPercent: Number(onchain.stakedPercent),
+    activeValidators: Number(onchain.activeValidators),
+    nominatorCount: Number(onchain.nominatorCount),
+    referendumCount: Number(onchain.referendumCount),
+    recentOngoingReferenda: Number.isFinite(onchain.recentOngoingReferenda) ? Number(onchain.recentOngoingReferenda) : -1,
+    averageExtrinsics: Number(onchain.averageExtrinsics),
+    cached: true,
+    updatedAt: data?.createdAt?.toDate?.().toISOString?.(),
+  };
+}
+
 function DotChart({ candles, range }: { candles: Candle[]; range: ChartRange }) {
   const width = 960;
   const height = 250;
@@ -802,13 +1069,19 @@ export default function App() {
   const [ticker, setTicker] = useState<{ price: number; changePercent: number; volume: number; quoteVolume: number } | null>(null);
   const [news, setNews] = useState<NewsItem[]>([]);
   const [devItems, setDevItems] = useState<DevItem[]>([]);
+  const [storedDevelopmentIndex, setStoredDevelopmentIndex] = useState<number | null>(null);
   const [marketInfo, setMarketInfo] = useState<DotMarketInfo | null>(null);
   const [fxRate, setFxRate] = useState<FxRate | null>(null);
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
+  const [macroInfo, setMacroInfo] = useState<MacroInfo | null>(null);
+  const [derivativesInfo, setDerivativesInfo] = useState<DerivativesInfo | null>(null);
+  const [onchainInfo, setOnchainInfo] = useState<OnchainInfo | null>(null);
+  const [etfInfo, setEtfInfo] = useState<EtfInfo | null>(null);
   const [ecosystemProjects, setEcosystemProjects] = useState<EcosystemProject[]>([]);
   const [newEcosystemProjects, setNewEcosystemProjects] = useState<NewEcosystemProject[]>([]);
   const [range, setRange] = useState<ChartRange>("3m");
   const [loading, setLoading] = useState(true);
+  const [assessmentReady, setAssessmentReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
 
@@ -821,22 +1094,26 @@ export default function App() {
     const ema200 = calculateEma(closes, 200);
     const rsi = calculateRsi(closes);
     const macd = calculateMacd(closes);
+    const atr = calculateAtr(candles);
+    const adx = calculateAdx(candles);
+    const bollinger = calculateBollinger(closes);
     const volumeRatio = average(volumes.slice(-21, -1)) ? (volumes[volumes.length - 1] ?? 0) / average(volumes.slice(-21, -1)) : null;
     const change7d = calculatePeriodChange(closes, 7);
     const change30d = calculatePeriodChange(closes, 30);
     const yearlyHigh = candles.length ? Math.max(...candles.map((candle) => candle.high)) : null;
     const yearlyLow = candles.length ? Math.min(...candles.map((candle) => candle.low)) : null;
     const fibPosition = price !== null && yearlyHigh !== null && yearlyLow !== null && yearlyHigh > yearlyLow ? ((price - yearlyLow) / (yearlyHigh - yearlyLow)) * 100 : null;
-    const signal = buildSignal(candles, ticker?.changePercent ?? null, change7d, news, devItems, networkInfo);
+    const signal = buildSignal(candles, ticker?.price ?? null, ticker?.changePercent ?? null, change7d, news, devItems, networkInfo, macroInfo, derivativesInfo, onchainInfo, etfInfo, storedDevelopmentIndex);
 
-    return { price, sma20w, ema50, ema200, rsi, macd, volumeRatio, yearlyHigh, yearlyLow, fibPosition, change7d, change30d, signal };
-  }, [candles, devItems, networkInfo, news, ticker]);
+    return { price, sma20w, ema50, ema200, rsi, macd, atr, adx, bollinger, volumeRatio, yearlyHigh, yearlyLow, fibPosition, change7d, change30d, signal };
+  }, [candles, derivativesInfo, devItems, etfInfo, macroInfo, networkInfo, news, onchainInfo, storedDevelopmentIndex, ticker]);
 
   async function loadData() {
     setLoading(true);
+    setAssessmentReady(false);
     setError(null);
     try {
-      const [candlesResult, tickerResult, newsResult, devResult, marketResult, fxResult, networkResult, ecosystemResult] = await Promise.allSettled([
+      const [candlesResult, tickerResult, newsResult, devResult, marketResult, fxResult, networkResult, ecosystemResult, macroResult, derivativesResult, onchainResult, etfResult, storedDevelopmentResult] = await Promise.allSettled([
         fetchCandles(),
         fetchTicker24h(),
         fetchNews(),
@@ -845,6 +1122,11 @@ export default function App() {
         fetchUsdKrw(),
         fetchNetworkInfo(),
         fetchEcosystemProjects(),
+        fetchMacroInfo(),
+        fetchDerivativesInfo(),
+        fetchOnchainInfo(),
+        fetchEtfInfo(),
+        fetchStoredDevelopmentIndex(),
       ] as const);
 
       if (candlesResult.status === "fulfilled") setCandles(candlesResult.value);
@@ -854,6 +1136,11 @@ export default function App() {
       if (marketResult.status === "fulfilled") setMarketInfo(marketResult.value);
       if (fxResult.status === "fulfilled") setFxRate(fxResult.value);
       if (networkResult.status === "fulfilled") setNetworkInfo(networkResult.value);
+      if (macroResult.status === "fulfilled") setMacroInfo(macroResult.value);
+      if (derivativesResult.status === "fulfilled") setDerivativesInfo(derivativesResult.value);
+      if (onchainResult.status === "fulfilled") setOnchainInfo(onchainResult.value);
+      if (etfResult.status === "fulfilled") setEtfInfo(etfResult.value);
+      if (storedDevelopmentResult.status === "fulfilled") setStoredDevelopmentIndex(storedDevelopmentResult.value);
       if (ecosystemResult.status === "fulfilled") {
         setEcosystemProjects(ecosystemResult.value);
         setNewEcosystemProjects(await fetchNewEcosystemProjects(ecosystemResult.value).catch(() => []));
@@ -868,8 +1155,29 @@ export default function App() {
         ["환율", fxResult],
         ["네트워크", networkResult],
         ["생태계", ecosystemResult],
-      ].flatMap(([name, result]) => (typeof result === "object" && result.status === "rejected" ? [name as string] : []));
+        ["BTC 시장", macroResult],
+        ["선물 수급", derivativesResult],
+        ["온체인", onchainResult],
+        ["TDOT ETF", etfResult],
+      ].flatMap(([name, result]) =>
+        typeof result === "object" && result.status === "rejected"
+          ? [`${name as string} (${result.reason instanceof Error ? result.reason.message : "응답 오류"})`]
+          : [],
+      );
       if (failures.length) setError(`일부 데이터 갱신 실패: ${failures.join(", ")}`);
+      setAssessmentReady(
+        candlesResult.status === "fulfilled" &&
+          candlesResult.value.length >= 200 &&
+          tickerResult.status === "fulfilled" &&
+          newsResult.status === "fulfilled" &&
+          devResult.status === "fulfilled" &&
+          (devResult.value.length > 0 || (storedDevelopmentResult.status === "fulfilled" && storedDevelopmentResult.value !== null)) &&
+          networkResult.status === "fulfilled" &&
+          macroResult.status === "fulfilled" &&
+          derivativesResult.status === "fulfilled" &&
+          onchainResult.status === "fulfilled" &&
+          etfResult.status === "fulfilled",
+      );
       if (candlesResult.status === "fulfilled" || tickerResult.status === "fulfilled") setUpdatedAt(new Date());
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "DOT 데이터를 불러오지 못했습니다.");
@@ -898,16 +1206,25 @@ export default function App() {
 
       {error && <div className="errorBanner">{error}</div>}
 
-      <section className={`decisionPanel ${indicator.signal.direction}`}>
+      <section className={`decisionPanel ${assessmentReady ? indicator.signal.direction : "pending"}`}>
         <div>
           <span>현재 판단</span>
-          <strong>{indicator.signal.label}</strong>
-          <p>{indicator.signal.reasons[0] ?? "데이터를 모으는 중입니다."}</p>
+          <strong>{assessmentReady ? indicator.signal.label : loading ? "분석 중" : "평가 보류"}</strong>
+          <p>
+            {assessmentReady
+              ? indicator.signal.reasons[0] ?? "판단 근거를 계산하지 못했습니다."
+              : loading
+                ? "필수 데이터를 모두 수집한 뒤 점수를 표시합니다."
+                : "필수 데이터 일부를 불러오지 못해 점수를 표시하지 않습니다."}
+          </p>
         </div>
-        <div className="decisionScore">
-          <strong>{indicator.signal.score}</strong>
-          <small>종합 점수</small>
-        </div>
+        {assessmentReady && (
+          <div className="decisionScore">
+            <strong>{indicator.signal.score}</strong>
+            <small>종합 점수</small>
+            <small>신뢰도 {indicator.signal.confidence}%</small>
+          </div>
+        )}
       </section>
 
       <section className="metricGrid">
@@ -954,10 +1271,34 @@ export default function App() {
         </div>
         <div className="metric">
           <span>개발 지수</span>
-          <strong className={indicator.signal.developmentIndex >= 70 ? "upText" : indicator.signal.developmentIndex >= 40 ? "watchText" : "downText"}>
-            {indicator.signal.developmentIndex}
+          <strong className={assessmentReady ? (indicator.signal.developmentIndex >= 70 ? "upText" : indicator.signal.developmentIndex >= 40 ? "watchText" : "downText") : undefined}>
+            {assessmentReady ? indicator.signal.developmentIndex : "-"}
           </strong>
-          <small>{developmentLabel(indicator.signal.developmentIndex)} · 공식 GitHub 3개</small>
+          <small>{assessmentReady ? `${developmentLabel(indicator.signal.developmentIndex)} · 공식 GitHub 3개` : "데이터 확인 중"}</small>
+        </div>
+        <div className="metric">
+          <span>BTC 시장 환경</span>
+          <strong className={macroInfo?.btcEma200 && macroInfo.btcPrice >= macroInfo.btcEma200 ? "upText" : "downText"}>
+            {macroInfo?.btcEma200 ? (macroInfo.btcPrice >= macroInfo.btcEma200 ? "우호" : "방어") : "-"}
+          </strong>
+          <small>BTC 200일선 · 24시간 {formatPercent(macroInfo?.btcChange24h ?? null)}</small>
+        </div>
+        <div className="metric">
+          <span>DOT/BTC 상대 강도</span>
+          <strong className={(macroInfo?.dotBtcChange7d ?? 0) >= 0 ? "upText" : "downText"}>{formatPercent(macroInfo?.dotBtcChange7d ?? null)}</strong>
+          <small>최근 7일 · BTC 대비</small>
+        </div>
+        <div className="metric">
+          <span>신호 신뢰도</span>
+          <strong className={assessmentReady && indicator.signal.confidence >= 70 ? "upText" : "watchText"}>{assessmentReady ? `${indicator.signal.confidence}%` : "-"}</strong>
+          <small>ADX·데이터 완성도·점수 강도</small>
+        </div>
+        <div className="metric">
+          <span>변동 위험</span>
+          <strong className={indicator.signal.riskLevel === "high" ? "downText" : indicator.signal.riskLevel === "medium" ? "watchText" : "upText"}>
+            {indicator.signal.riskLevel === "high" ? "높음" : indicator.signal.riskLevel === "medium" ? "보통" : indicator.signal.riskLevel === "low" ? "낮음" : "-"}
+          </strong>
+          <small>ATR {indicator.price && indicator.atr ? formatPercent((indicator.atr / indicator.price) * 100) : "-"}</small>
         </div>
       </section>
 
@@ -977,10 +1318,59 @@ export default function App() {
           <h2>판단 이유</h2>
         </div>
         <div className="reasonList">
-          {indicator.signal.reasons.map((reason) => (
-            <div key={reason}>{reason}</div>
-          ))}
+          {assessmentReady ? (
+            indicator.signal.reasons.map((reason) => <div key={reason}>{reason}</div>)
+          ) : (
+            <div>{loading ? "가격·뉴스·개발·네트워크 데이터를 수집하고 있습니다." : "필수 데이터가 완성되지 않아 판단을 보류했습니다."}</div>
+          )}
         </div>
+      </section>
+
+      <section className="contextGrid">
+        <div className="panel contextPanel">
+          <div className="panelTitle">
+            <TrendingUp size={18} />
+            <h2>Binance 선물 수급</h2>
+          </div>
+          <dl>
+            <div><dt>펀딩비</dt><dd className={(derivativesInfo?.fundingRatePercent ?? 0) > 0.05 ? "downText" : "upText"}>{formatPercent(derivativesInfo?.fundingRatePercent ?? null)}</dd></div>
+            <div><dt>미결제약정</dt><dd>{formatUsdCompact(derivativesInfo?.openInterestUsd ?? null)}</dd></div>
+            <div><dt>24시간 OI 변화</dt><dd className={(derivativesInfo?.openInterestChange24h ?? 0) >= 0 ? "upText" : "downText"}>{formatPercent(derivativesInfo?.openInterestChange24h ?? null)}</dd></div>
+            <div><dt>롱/숏 계정 비율</dt><dd>{formatNumber(derivativesInfo?.longShortRatio ?? null)}x</dd></div>
+          </dl>
+        </div>
+
+        <div className="panel contextPanel">
+          <div className="panelTitle">
+            <ShieldCheck size={18} />
+            <h2>Polkadot 온체인</h2>
+          </div>
+          <dl>
+            <div><dt>스테이킹 비율</dt><dd>{formatPercent(onchainInfo?.stakedPercent ?? null)}</dd></div>
+            <div><dt>총 스테이킹</dt><dd>{formatNumber(onchainInfo?.totalStaked ?? null, 0)} DOT</dd></div>
+            <div><dt>활성 검증인</dt><dd>{formatNumber(onchainInfo?.activeValidators ?? null, 0)}</dd></div>
+            <div><dt>노미네이터</dt><dd>{formatNumber(onchainInfo?.nominatorCount ?? null, 0)}</dd></div>
+            <div><dt>최근 블록 호출</dt><dd>{formatNumber(onchainInfo?.averageExtrinsics ?? null, 0)}건</dd></div>
+          </dl>
+          <small>{onchainInfo?.cached ? `Firebase 스냅샷${onchainInfo.updatedAt ? ` · ${formatDate(onchainInfo.updatedAt)}` : ""}` : onchainInfo ? "실시간 Polkadot RPC" : "온체인 데이터 확인 중"}</small>
+        </div>
+
+        <a className="panel contextPanel etfPanel" href="https://www.21shares.com/en-us/products-us/tdot" rel="noreferrer" target="_blank">
+          <div className="panelTitle">
+            <Landmark size={18} />
+            <h2>21Shares TDOT ETF</h2>
+            <ExternalLink size={13} />
+          </div>
+          <dl>
+            <div><dt>NAV / 시장가</dt><dd>${formatUsdt(etfInfo?.nav ?? null)} / ${formatUsdt(etfInfo?.marketPrice ?? null)}</dd></div>
+            <div><dt>순자산 AUM</dt><dd>{formatUsdCompact(etfInfo?.aum ?? null)}</dd></div>
+            <div><dt>보유 DOT</dt><dd>{formatNumber(etfInfo?.dotHoldings ?? null, 0)} DOT</dd></div>
+            <div><dt>5거래일 AUM</dt><dd className={(etfInfo?.aumChange5d ?? 0) >= 0 ? "upText" : "downText"}>{formatPercent(etfInfo?.aumChange5d ?? null)}</dd></div>
+            <div><dt>프리미엄/할인</dt><dd>{formatPercent(etfInfo?.premiumDiscount ?? null)}</dd></div>
+            <div><dt>거래량 배율</dt><dd>{etfInfo?.volumeRatio !== null && etfInfo?.volumeRatio !== undefined ? `${formatNumber(etfInfo.volumeRatio)}x` : "-"}</dd></div>
+          </dl>
+          <small>{etfInfo ? `${formatDate(etfInfo.valuationDate)} 기준 · Nasdaq TDOT` : "공식 ETF 데이터 확인 중"}</small>
+        </a>
       </section>
 
       <section className="fundamentalGrid">
@@ -990,9 +1380,9 @@ export default function App() {
             <h2>스테이킹 상태</h2>
             <ExternalLink size={13} />
           </div>
-          <strong>공식 현황 확인</strong>
-          <p>스테이킹 비율, 예상 보상률, 검증자 상태를 확인합니다.</p>
-          <small>노미네이션 풀은 1 DOT부터 참여 가능</small>
+          <strong>{formatPercent(onchainInfo?.stakedPercent ?? null)}</strong>
+          <p>{formatNumber(onchainInfo?.totalStaked ?? null, 0)} DOT 스테이킹 · 활성 검증인 {formatNumber(onchainInfo?.activeValidators ?? null, 0)}</p>
+          <small>노미네이터 {formatNumber(onchainInfo?.nominatorCount ?? null, 0)}명</small>
         </a>
 
         <div className="panel fundamentalPanel">
@@ -1000,10 +1390,10 @@ export default function App() {
             <Coins size={18} />
             <h2>공급·인플레이션</h2>
           </div>
-          <strong>{formatNumber(marketInfo?.totalSupply ?? null, 0)} DOT</strong>
+          <strong>{formatNumber(onchainInfo?.totalIssuance ?? marketInfo?.totalSupply ?? null, 0)} DOT</strong>
           <p>연간 신규 발행량 1억 2천만 DOT</p>
           <small>
-            현재 총공급 대비 약 {marketInfo?.totalSupply ? formatPercent((120_000_000 / marketInfo.totalSupply) * 100) : "-"}
+            현재 총공급 대비 약 {(onchainInfo?.totalIssuance ?? marketInfo?.totalSupply) ? formatPercent((120_000_000 / (onchainInfo?.totalIssuance ?? marketInfo?.totalSupply ?? 1)) * 100) : "-"}
           </small>
         </div>
 
@@ -1026,9 +1416,9 @@ export default function App() {
             <h2>중요 OpenGov</h2>
             <ExternalLink size={13} />
           </div>
-          <strong>진행 중 안건 보기</strong>
-          <p>런타임 업그레이드, Treasury 지출, 스테이킹 변경을 확인합니다.</p>
-          <small>Subsquare Polkadot OpenGov</small>
+          <strong>누적 #{formatNumber(onchainInfo?.referendumCount ?? null, 0)}</strong>
+          <p>{onchainInfo && onchainInfo.recentOngoingReferenda >= 0 ? `최근 12개 중 진행 ${formatNumber(onchainInfo.recentOngoingReferenda, 0)}건` : "진행 상태는 OpenGov에서 확인"}</p>
+          <small>런타임·Treasury·스테이킹 변경 추적</small>
         </a>
       </section>
 
@@ -1128,6 +1518,18 @@ export default function App() {
             <div>
               <dt>거래량 배율</dt>
               <dd>{indicator.volumeRatio ? `${formatNumber(indicator.volumeRatio)}x` : "-"}</dd>
+            </div>
+            <div>
+              <dt><span>ADX</span><small>25 이상이면 추세 신뢰</small></dt>
+              <dd>{formatNumber(indicator.adx)}<small>{indicator.adx !== null ? (indicator.adx >= 25 ? "추세 뚜렷" : indicator.adx < 20 ? "횡보 가능" : "추세 형성 중") : "계산 중"}</small></dd>
+            </div>
+            <div>
+              <dt><span>ATR 변동성</span><small>가격 대비 일간 변동 폭</small></dt>
+              <dd>{indicator.price && indicator.atr ? formatPercent((indicator.atr / indicator.price) * 100) : "-"}<small>ATR {formatUsdt(indicator.atr)} USDT</small></dd>
+            </div>
+            <div>
+              <dt><span>볼린저 밴드</span><small>하단 0% · 상단 100%</small></dt>
+              <dd>{indicator.bollinger.position !== null ? `${formatNumber(indicator.bollinger.position * 100, 1)}%` : "-"}<small>밴드 폭 {formatPercent(indicator.bollinger.widthPercent)}</small></dd>
             </div>
             <div>
               <dt>피보나치 위치</dt>
