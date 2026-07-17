@@ -2,7 +2,7 @@
 
 React + Vite + Firebase 기반 개인용 암호화폐 신호 알림 프로젝트입니다.
 
-기본 구조는 `GitHub Actions schedule -> Firestore -> React + Kakao`입니다. GitHub Actions가 30분마다 관심 코인만 스캔하고, Binance 일봉 데이터를 기준으로 매수 신호, 하락 위험, 24시간 10% 이상 상승 조건이 새로 잡히면 카카오톡 "나에게 보내기" API로 알림을 보냅니다. Firebase Functions/Blaze 요금제 없이 운영하는 무료 구성입니다.
+기본 구조는 `GitHub Actions schedule -> Firestore -> React + Kakao`입니다. GitHub Actions가 10분마다 DOT를 스캔하고, Binance 일봉 데이터를 기준으로 매수·매도, 종합점수 플러스 전환, 24시간 10% 이상 상승 조건에 새로 진입하면 카카오톡 "나에게 보내기" API로 알림을 보냅니다. Firebase Functions/Blaze 요금제 없이 운영하는 무료 구성입니다.
 
 ## 포함된 것
 
@@ -13,7 +13,7 @@ React + Vite + Firebase 기반 개인용 암호화폐 신호 알림 프로젝트
 - Firestore 관심 코인만 자동 신호/카카오 알림 대상으로 사용
 - Binance USDT 현물 캔들 수집
 - 관심 코인 24시간 10% 이상 상승 시 카카오 알림
-- `1d` 일봉 기준 30분마다 자동 스캔
+- `1d` 일봉 기준 10분마다 자동 스캔
 - EMA 50/200, RSI, 거래량 급증, 24시간 상승률 점수
 - 카카오 access token 자동 갱신 후 "나에게 보내기"
 - 중복 알림 방지용 `/state/{symbol_timeframe}`
@@ -83,7 +83,7 @@ VITE_FIREBASE_APP_ID
 VITE_FIREBASE_MEASUREMENT_ID
 ```
 
-GitHub Actions는 `main` 브랜치 push 또는 수동 실행으로 GitHub Pages를 배포합니다. 자동 카카오 알림은 `.github/workflows/scheduled-alerts.yml`이 30분마다 별도로 실행합니다.
+GitHub Actions는 `main` 브랜치 push 또는 수동 실행으로 GitHub Pages를 배포합니다. 자동 카카오 알림은 `.github/workflows/scheduled-alerts.yml`이 10분마다 별도로 실행합니다.
 
 ## Custom domain
 

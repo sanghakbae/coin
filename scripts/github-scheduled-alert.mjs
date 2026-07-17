@@ -67,13 +67,35 @@ async function main() {
   await saveSignals(db, signals);
 
   for (const signal of signals) {
-    if ((signal.dayChangePercent ?? 0) >= PUMP_ALERT_THRESHOLD) {
-      await sendKakaoMemo(signal, "pump");
-    } else if (signal.direction !== "neutral") {
+    const previous = await readPreviousState(db, signal);
+    const hasPreviousState = previous !== null;
+    const enteredSignal = hasPreviousState && signal.direction !== "neutral" && previous.direction !== signal.direction;
+    const crossedPositive = hasPreviousState && previous.score <= 0 && signal.score > 0;
+    const crossedPump = hasPreviousState && previous.dayChangePercent < PUMP_ALERT_THRESHOLD && (signal.dayChangePercent ?? 0) >= PUMP_ALERT_THRESHOLD;
+
+    if (enteredSignal) {
       await sendKakaoMemo(signal);
+    } else if (crossedPositive) {
+      await sendKakaoMemo(signal, "positive", previous.score);
+    } else if (crossedPump) {
+      await sendKakaoMemo(signal, "pump");
     }
     await updateCurrentState(db, signal);
   }
+}
+
+async function readPreviousState(db, signal) {
+  const snapshot = await db.collection("state").doc(`${signal.symbol}_${signal.timeframe}`).get();
+  if (!snapshot.exists) return null;
+  const data = snapshot.data();
+  const score = Number(data?.currentScore);
+  const dayChangePercent = Number(data?.currentDayChangePercent);
+  if (!Number.isFinite(score)) return null;
+  return {
+    score,
+    direction: typeof data?.currentDirection === "string" ? data.currentDirection : "neutral",
+    dayChangePercent: Number.isFinite(dayChangePercent) ? dayChangePercent : 0,
+  };
 }
 
 async function syncEcosystemProjects(db) {
@@ -319,6 +341,7 @@ async function updateCurrentState(db, signal) {
         currentDirection: signal.direction,
         currentScore: signal.score,
         currentPrice: signal.price,
+        currentDayChangePercent: signal.dayChangePercent,
         currentReason: signal.reason,
         updatedAt: FieldValue.serverTimestamp(),
       },
@@ -326,11 +349,15 @@ async function updateCurrentState(db, signal) {
     );
 }
 
-async function sendKakaoMemo(signal, alertType = "signal") {
+async function sendKakaoMemo(signal, alertType = "signal", previousScore = null) {
   const accessToken = await refreshKakaoAccessToken();
   const asset = signal.symbol.endsWith("USDT") ? signal.symbol.slice(0, -4) : signal.symbol;
-  const label = alertType === "pump" ? "10% 이상 상승" : signal.direction === "buy" ? "매수 신호" : "매도 신호";
-  const detail = alertType === "pump" ? `24시간 상승률: ${round(signal.dayChangePercent)}%` : signal.reason;
+  const label = alertType === "positive" ? "종합점수 플러스 전환" : alertType === "pump" ? "10% 이상 상승" : signal.direction === "buy" ? "매수 신호" : "매도 신호";
+  const detail = alertType === "positive"
+    ? `이전 점수 ${previousScore} → 현재 점수 ${signal.score}\n${signal.reason}`
+    : alertType === "pump"
+      ? `24시간 상승률: ${round(signal.dayChangePercent)}%`
+      : signal.reason;
   const message = `[${label}] ${asset} ${signal.timeframe}
 점수: ${signal.score}
 가격: ${signal.price.toLocaleString("ko-KR", { maximumFractionDigits: 6 })} USDT
