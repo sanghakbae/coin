@@ -205,9 +205,13 @@ async function fetchBinanceTicker24h(symbol) {
 async function fetchBinanceJson(path) {
   const errors = [];
   for (const base of BINANCE_API_BASES) {
-    const response = await fetch(`${base}${path}`, { headers: { accept: "application/json" } });
-    if (response.ok) return response.json();
-    errors.push(`${base} ${response.status}`);
+    try {
+      const response = await fetch(`${base}${path}`, { headers: { accept: "application/json" } });
+      if (response.ok) return await readJsonResponse(response, base);
+      errors.push(`${base} ${response.status}`);
+    } catch (error) {
+      errors.push(`${base} ${error.message}`);
+    }
   }
   throw new Error(`Binance request failed: ${errors.join(", ")}`);
 }
@@ -233,13 +237,23 @@ async function fetchFuturesJson(path) {
   for (const base of ["https://fapi.binance.com", "https://fapi1.binance.com"]) {
     try {
       const response = await fetch(`${base}${path}`, { headers: { accept: "application/json" } });
-      if (response.ok) return response.json();
+      if (response.ok) return await readJsonResponse(response, base);
       errors.push(`${base} ${response.status}`);
     } catch (error) {
       errors.push(`${base} ${error.message}`);
     }
   }
   throw new Error(`Binance futures failed: ${errors.join(", ")}`);
+}
+
+async function readJsonResponse(response, source) {
+  const body = await response.text();
+  if (!body.trim()) throw new Error(`${source} empty response`);
+  try {
+    return JSON.parse(body);
+  } catch {
+    throw new Error(`${source} invalid JSON`);
+  }
 }
 
 async function fetchDerivativesInfo() {

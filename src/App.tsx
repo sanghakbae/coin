@@ -455,11 +455,25 @@ function buildSignal(
 async function fetchBinanceJson(path: string) {
   const errors: string[] = [];
   for (const base of BINANCE_BASES) {
-    const response = await fetch(`${base}${path}`, { headers: { accept: "application/json" } });
-    if (response.ok) return response.json();
-    errors.push(`${base} ${response.status}`);
+    try {
+      const response = await fetch(`${base}${path}`, { headers: { accept: "application/json" } });
+      if (response.ok) return await readJsonResponse(response, base);
+      errors.push(`${base} ${response.status}`);
+    } catch (error) {
+      errors.push(`${base} ${error instanceof Error ? error.message : "연결 실패"}`);
+    }
   }
   throw new Error(`Binance 데이터 요청 실패: ${errors.join(", ")}`);
+}
+
+async function readJsonResponse<T = unknown>(response: Response, source: string): Promise<T> {
+  const body = await response.text();
+  if (!body.trim()) throw new Error(`${source} 빈 응답`);
+  try {
+    return JSON.parse(body) as T;
+  } catch {
+    throw new Error(`${source} JSON 응답 오류`);
+  }
 }
 
 async function fetchCandles() {
@@ -504,7 +518,7 @@ async function fetchFuturesJson<T>(path: string): Promise<T> {
   for (const base of bases) {
     try {
       const response = await fetch(`${base}${path}`, { headers: { accept: "application/json" } });
-      if (response.ok) return (await response.json()) as T;
+      if (response.ok) return await readJsonResponse<T>(response, base);
     } catch {
       // Try the next Binance futures endpoint.
     }
