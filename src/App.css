@@ -251,6 +251,10 @@ h1 {
   color: #ff746b !important;
 }
 
+.watchText {
+  color: #ffe66d !important;
+}
+
 .rangeControls {
   display: flex;
   flex-wrap: wrap;

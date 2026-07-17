@@ -160,17 +160,21 @@ async function fetchBinanceJson(path) {
 
 async function fetchDotContext() {
   const repos = ["paritytech/polkadot-sdk", "polkadot-fellows/runtimes", "w3f/polkadot-spec"];
-  const [newsResult, commitResults] = await Promise.all([
+  const [newsResult, repoResults] = await Promise.all([
     fetch("https://min-api.cryptocompare.com/data/v2/news/?lang=EN", { headers: { accept: "application/json" } })
       .then(async (response) => (response.ok ? response.json() : { Data: [] }))
       .catch(() => ({ Data: [] })),
-    Promise.all(
-      repos.map((repo) =>
-        fetch(`https://api.github.com/repos/${repo}/commits?per_page=1`, { headers: { accept: "application/vnd.github+json" } })
+    Promise.all(repos.map(async (repo) => {
+      const [commits, releases] = await Promise.all([
+        fetch(`https://api.github.com/repos/${repo}/commits?per_page=4`, { headers: { accept: "application/vnd.github+json" } })
           .then(async (response) => (response.ok ? response.json() : []))
           .catch(() => []),
-      ),
-    ),
+        fetch(`https://api.github.com/repos/${repo}/releases?per_page=1`, { headers: { accept: "application/vnd.github+json" } })
+          .then(async (response) => (response.ok ? response.json() : []))
+          .catch(() => []),
+      ]);
+      return { repo, commits, releases };
+    })),
   ]);
 
   const articles = (newsResult.Data || []).filter((item) =>
@@ -178,14 +182,42 @@ async function fetchDotContext() {
   );
   const newsScoreRaw = articles.slice(0, 8).reduce((sum, item) => sum + scoreNewsText(`${item.title || ""} ${item.body || ""}`), 0);
   const newsScore = newsScoreRaw >= 2 ? Math.min(12, 4 + newsScoreRaw * 2) : newsScoreRaw <= -2 ? -Math.min(12, 4 + Math.abs(newsScoreRaw) * 2) : 0;
-  const now = Date.now();
-  const activeRepoCount = commitResults.filter((rows) => {
+  const activeRepoCount = repoResults.filter(({ commits }) => {
+    const now = Date.now();
+    const rows = commits;
     const date = rows[0]?.commit?.author?.date;
     return date && now - new Date(date).getTime() <= 30 * 86_400_000;
   }).length;
-  const devScore = activeRepoCount >= 2 ? 8 : activeRepoCount === 1 ? 3 : -4;
+  const developmentIndex = calculateDevelopmentIndex(repoResults, repos.length);
+  const devScore = developmentScore(developmentIndex);
 
-  return { articleCount: articles.length, newsScore, activeRepoCount, devScore };
+  return { articleCount: articles.length, newsScore, activeRepoCount, developmentIndex, devScore };
+}
+
+function calculateDevelopmentIndex(repoResults, repoCount) {
+  const now = Date.now();
+  const commits = repoResults.flatMap(({ repo, commits: rows }) => rows.map((item) => ({ repo, date: item.commit?.author?.date })));
+  const releases = repoResults.flatMap(({ releases: rows }) => rows.map((item) => item.published_at));
+  const commits30d = commits.filter((item) => item.date && now - new Date(item.date).getTime() <= 30 * 86_400_000);
+  const activeRepos = new Set(commits30d.map((item) => item.repo)).size;
+  const latestCommitAt = commits.reduce((latest, item) => Math.max(latest, item.date ? new Date(item.date).getTime() : 0), 0);
+  const latestCommitDays = latestCommitAt ? (now - latestCommitAt) / 86_400_000 : Number.POSITIVE_INFINITY;
+  const recencyScore = latestCommitDays <= 2 ? 40 : latestCommitDays <= 7 ? 34 : latestCommitDays <= 14 ? 26 : latestCommitDays <= 30 ? 16 : latestCommitDays <= 60 ? 8 : 0;
+  const breadthScore = Math.min(25, (activeRepos / repoCount) * 25);
+  const cadenceScore = Math.min(20, (commits30d.length / (repoCount * 4)) * 20);
+  const latestReleaseAt = releases.reduce((latest, date) => Math.max(latest, date ? new Date(date).getTime() : 0), 0);
+  const latestReleaseDays = latestReleaseAt ? (now - latestReleaseAt) / 86_400_000 : Number.POSITIVE_INFINITY;
+  const releaseScore = latestReleaseDays <= 90 ? 15 : latestReleaseDays <= 180 ? 8 : 0;
+  return Math.round(Math.min(100, recencyScore + breadthScore + cadenceScore + releaseScore));
+}
+
+function developmentScore(index) {
+  if (index >= 80) return 12;
+  if (index >= 65) return 8;
+  if (index >= 50) return 3;
+  if (index >= 35) return -3;
+  if (index >= 20) return -8;
+  return -12;
 }
 
 function scoreNewsText(text) {
@@ -252,6 +284,7 @@ function calculateSignal(coin, timeframe, candles, ticker24h, context) {
     newsScore: context.newsScore,
     newsArticleCount: context.articleCount,
     activeDevRepos: context.activeRepoCount,
+    developmentIndex: context.developmentIndex,
     components: { trend, rsi: rsiScore, volume, pump, news: context.newsScore, development: context.devScore },
   };
 }
@@ -302,6 +335,7 @@ async function sendKakaoMemo(signal, alertType = "signal") {
 점수: ${signal.score}
 가격: ${signal.price.toLocaleString("ko-KR", { maximumFractionDigits: 6 })} USDT
 시총 순위: ${signal.marketCapRank ? `#${signal.marketCapRank}` : "대시보드 확인"}
+개발 지수: ${signal.developmentIndex}/100
 ${detail}`;
 
   const response = await fetch("https://kapi.kakao.com/v2/api/talk/memo/default/send", {

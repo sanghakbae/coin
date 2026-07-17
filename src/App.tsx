@@ -35,6 +35,7 @@ interface DotSignal {
   direction: SignalDirection;
   label: string;
   score: number;
+  developmentIndex: number;
   reasons: string[];
 }
 
@@ -262,6 +263,39 @@ function weekMarkers(times: number[], width: number, padding: number) {
     .filter((x): x is number => x !== null);
 }
 
+function calculateDevelopmentIndex(devItems: DevItem[]) {
+  const now = Date.now();
+  const commits = devItems.filter((item) => item.type === "commit");
+  const releases = devItems.filter((item) => item.type === "release");
+  const commits30d = commits.filter((item) => now - new Date(item.date).getTime() <= 30 * 86_400_000);
+  const activeRepos = new Set(commits30d.map((item) => item.repo)).size;
+  const latestCommitAt = commits.reduce((latest, item) => Math.max(latest, new Date(item.date).getTime()), 0);
+  const latestCommitDays = latestCommitAt ? (now - latestCommitAt) / 86_400_000 : Number.POSITIVE_INFINITY;
+  const recencyScore = latestCommitDays <= 2 ? 40 : latestCommitDays <= 7 ? 34 : latestCommitDays <= 14 ? 26 : latestCommitDays <= 30 ? 16 : latestCommitDays <= 60 ? 8 : 0;
+  const breadthScore = Math.min(25, (activeRepos / DEV_REPOS.length) * 25);
+  const cadenceScore = Math.min(20, (commits30d.length / (DEV_REPOS.length * 4)) * 20);
+  const latestReleaseAt = releases.reduce((latest, item) => Math.max(latest, new Date(item.date).getTime()), 0);
+  const latestReleaseDays = latestReleaseAt ? (now - latestReleaseAt) / 86_400_000 : Number.POSITIVE_INFINITY;
+  const releaseScore = latestReleaseDays <= 90 ? 15 : latestReleaseDays <= 180 ? 8 : 0;
+  return Math.round(Math.min(100, recencyScore + breadthScore + cadenceScore + releaseScore));
+}
+
+function developmentScore(index: number) {
+  if (index >= 80) return 12;
+  if (index >= 65) return 8;
+  if (index >= 50) return 3;
+  if (index >= 35) return -3;
+  if (index >= 20) return -8;
+  return -12;
+}
+
+function developmentLabel(index: number) {
+  if (index >= 70) return "개발 매우 활발";
+  if (index >= 40) return "개발 정상 진행";
+  if (index >= 20) return "개발 활동 둔화";
+  return "개발 장기 정체";
+}
+
 function buildSignal(candles: Candle[], change24h: number | null, change7d: number | null, news: NewsItem[], devItems: DevItem[], networkInfo: NetworkInfo | null): DotSignal {
   const closes = candles.map((candle) => candle.close);
   const volumes = candles.map((candle) => candle.volume);
@@ -357,19 +391,10 @@ function buildSignal(candles: Candle[], change24h: number | null, change7d: numb
     reasons.push(`DOT 뉴스 ${news.length}건: 뚜렷한 긍정·부정 우위 없음`);
   }
 
-  const now = Date.now();
-  const recentDevItems = devItems.filter((item) => item.type === "commit" && now - new Date(item.date).getTime() <= 30 * 86_400_000);
-  const activeRepos = new Set(recentDevItems.map((item) => item.repo)).size;
-  if (activeRepos >= 2) {
-    score += 8;
-    reasons.push(`최근 30일 GitHub ${activeRepos}개 저장소에서 개발 지속: 전망에 가점`);
-  } else if (activeRepos === 1) {
-    score += 3;
-    reasons.push("최근 30일 GitHub 1개 저장소 활동 확인: 소폭 가점");
-  } else {
-    score -= 4;
-    reasons.push("최근 30일 추적 GitHub 활동이 없어 개발 모멘텀 감점");
-  }
+  const developmentIndex = calculateDevelopmentIndex(devItems);
+  const developmentContribution = developmentScore(developmentIndex);
+  score += developmentContribution;
+  reasons.push(`개발 지수 ${developmentIndex}점 · ${developmentLabel(developmentIndex)}: 종합점수 ${developmentContribution > 0 ? "+" : ""}${developmentContribution}`);
 
   if (networkInfo) {
     const finalityGap = networkInfo.bestBlock - networkInfo.finalizedBlock;
@@ -386,6 +411,7 @@ function buildSignal(candles: Candle[], change24h: number | null, change7d: numb
   return {
     direction,
     score: Math.round(score),
+    developmentIndex,
     label: direction === "buy" ? "매수" : direction === "risk" ? "매도" : "관망",
     reasons,
   };
@@ -985,9 +1011,11 @@ export default function App() {
           <small>Binance 일봉 기준</small>
         </div>
         <div className="metric">
-          <span>추적 저장소</span>
-          <strong>{formatNumber(devItems.filter((item) => item.type === "commit").length, 0)}</strong>
-          <small>3개 GitHub 최근 커밋</small>
+          <span>개발 지수</span>
+          <strong className={indicator.signal.developmentIndex >= 70 ? "upText" : indicator.signal.developmentIndex >= 40 ? "watchText" : "downText"}>
+            {indicator.signal.developmentIndex}
+          </strong>
+          <small>{developmentLabel(indicator.signal.developmentIndex)} · 공식 GitHub 3개</small>
         </div>
       </section>
 
