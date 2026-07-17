@@ -50,6 +50,7 @@ jobs:
         run: npm run build
 
       - name: Deploy Firestore rules
+        continue-on-error: true
         env:
           FIREBASE_SERVICE_ACCOUNT_COIN_F1318: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_COIN_F1318 }}
         run: |
