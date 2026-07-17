@@ -49,6 +49,13 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Deploy Firestore rules
+        env:
+          FIREBASE_SERVICE_ACCOUNT_COIN_F1318: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_COIN_F1318 }}
+        run: |
+          printf '%s' "$FIREBASE_SERVICE_ACCOUNT_COIN_F1318" > "$RUNNER_TEMP/firebase-service-account.json"
+          GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/firebase-service-account.json" npx firebase-tools@14 deploy --only firestore:rules --project coin-f1318 --non-interactive
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:

@@ -1,15 +1,21 @@
-name: Scheduled Coin Alerts
+name: Scheduled DOT Alerts
 
 on:
   schedule:
     - cron: "*/30 * * * *"
   workflow_dispatch:
+    inputs:
+      test_kakao:
+        description: "카카오 나에게 보내기 연결 테스트만 실행"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  group: scheduled-coin-alerts
+  group: scheduled-dot-alerts
   cancel-in-progress: false
 
 jobs:
@@ -21,7 +27,8 @@ jobs:
       KAKAO_CLIENT_SECRET: ${{ secrets.KAKAO_CLIENT_SECRET }}
       KAKAO_REFRESH_TOKEN: ${{ secrets.KAKAO_REFRESH_TOKEN }}
       WATCHLIST_SYMBOLS: ${{ secrets.WATCHLIST_SYMBOLS }}
-      SITE_URL: https://coin.sanghak.kr
+      SITE_URL: https://dot.sanghak.kr
+      KAKAO_TEST_MESSAGE: ${{ inputs.test_kakao || 'false' }}
 
     steps:
       - name: Checkout
@@ -38,7 +45,11 @@ jobs:
       - name: Check alert secrets
         run: |
           missing=0
-          for key in FIREBASE_SERVICE_ACCOUNT_COIN_F1318 KAKAO_REST_API_KEY KAKAO_REFRESH_TOKEN; do
+          required_keys="KAKAO_REST_API_KEY KAKAO_REFRESH_TOKEN"
+          if [ "$KAKAO_TEST_MESSAGE" != "true" ]; then
+            required_keys="FIREBASE_SERVICE_ACCOUNT_COIN_F1318 $required_keys"
+          fi
+          for key in $required_keys; do
             if [ -z "${!key}" ]; then
               echo "::error::Missing GitHub secret: $key"
               missing=1
@@ -46,5 +57,5 @@ jobs:
           done
           exit "$missing"
 
-      - name: Scan watched coins and send Kakao alerts
+      - name: Scan coins or send Kakao test
         run: node scripts/github-scheduled-alert.mjs

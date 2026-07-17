@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { Activity, CandlestickChart, LogIn, LogOut, Plus, Radio, Settings, Trash2 } from "lucide-react";
-import { GoogleAuthProvider, User, onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
-import { collection, doc, onSnapshot, serverTimestamp, setDoc } from "firebase/firestore";
-import { auth, db } from "./firebase";
-import type { SignalRecord } from "./types";
+import { Activity, ArrowDownRight, ArrowUpRight, Code2, Coins, ExternalLink, Landmark, Network, Newspaper, RefreshCw, ShieldCheck, TrendingUp } from "lucide-react";
 
-const WATCHLIST_STORAGE_KEY = "coin-signal-watchlist";
+const SYMBOL = "DOTUSDT";
+const DEV_REPOS = [
+  { owner: "paritytech", repo: "polkadot-sdk", label: "Polkadot SDK", role: "코어 SDK" },
+  { owner: "polkadot-fellows", repo: "runtimes", label: "Polkadot Runtimes", role: "실제 네트워크 런타임" },
+  { owner: "w3f", repo: "polkadot-spec", label: "Polkadot Spec", role: "프로토콜 명세" },
+] as const;
 const CHART_RANGES = [
   { label: "1주", value: "7d", days: 7 },
   { label: "1개월", value: "1m", days: 30 },
@@ -13,12 +14,16 @@ const CHART_RANGES = [
   { label: "6개월", value: "6m", days: 180 },
   { label: "1년", value: "1y", days: 365 },
 ] as const;
-const LIVE_BUY_THRESHOLD = 32;
-const LIVE_SELL_THRESHOLD = -32;
+const BINANCE_BASES = ["https://data-api.binance.vision", "https://api.binance.com", "https://api1.binance.com"];
+const STABLE_SYMBOLS = new Set([
+  "USDT", "USDC", "USDS", "DAI", "FDUSD", "TUSD", "USDE", "USDD", "USDP", "PYUSD", "USD1", "GUSD", "FRAX", "LUSD", "SUSD", "BUSD",
+  "RLUSD", "USD0", "USDY", "USYC", "USUALUSD", "USDTB", "SUSDS", "SUSDE", "EURC", "EURS", "EURT", "EURI", "AEUR", "EURCV",
+]);
 
 type ChartRange = (typeof CHART_RANGES)[number]["value"];
+type SignalDirection = "buy" | "risk" | "neutral";
 
-interface BinanceCandle {
+interface Candle {
   openTime: number;
   close: number;
   high: number;
@@ -26,40 +31,78 @@ interface BinanceCandle {
   volume: number;
 }
 
-interface MarketCoin {
+interface DotSignal {
+  direction: SignalDirection;
+  label: string;
+  score: number;
+  reasons: string[];
+}
+
+interface NewsItem {
+  id: string;
+  title: string;
+  source: string;
+  url: string;
+  publishedAt: number;
+  sentiment: number;
+}
+
+interface DevItem {
+  id: string;
+  repo: string;
+  title: string;
+  url: string;
+  date: string;
+  type: "commit" | "release";
+}
+
+interface DotMarketInfo {
+  rank: number | null;
+  marketCap: number | null;
+  circulatingSupply: number | null;
+  totalSupply: number | null;
+}
+
+interface FxRate {
+  rate: number;
+  date: string;
+}
+
+interface NetworkInfo {
+  peers: number;
+  syncing: boolean;
+  bestBlock: number;
+  finalizedBlock: number;
+  runtimeVersion: number;
+}
+
+interface EcosystemProject {
   id: string;
   name: string;
   symbol: string;
-  marketCapRank: number;
-  binanceSymbol: string;
+  image: string;
+  price: number | null;
+  marketCap: number | null;
+  change24h: number | null;
+  launchDate: string | null;
+  description: string;
+  dotHoldings: number | null;
 }
 
-const EXCLUDED_ASSETS = new Set([
-  "USDT",
-  "USDC",
-  "USDS",
-  "DAI",
-  "FDUSD",
-  "TUSD",
-  "USDE",
-  "USDD",
-  "USDP",
-  "PYUSD",
-  "USD1",
-  "GUSD",
-  "FRAX",
-  "LUSD",
-  "SUSD",
-  "BUSD",
-  "WBTC",
-  "WETH",
-  "STETH",
-  "WSTETH",
-]);
+interface NewEcosystemProject extends EcosystemProject {
+  firstSeen: number;
+}
 
 function formatNumber(value: number | null, digits = 2) {
   if (value === null || Number.isNaN(value)) return "-";
   return value.toLocaleString("ko-KR", { maximumFractionDigits: digits });
+}
+
+function formatUsdt(value: number | null) {
+  if (value === null || Number.isNaN(value)) return "-";
+  const abs = Math.abs(value);
+  const maximumFractionDigits = abs >= 1000 ? 2 : abs >= 1 ? 4 : abs >= 0.01 ? 6 : 8;
+  return value.toLocaleString("ko-KR", { maximumFractionDigits });
 }
 
 function formatPercent(value: number | null) {
@@ -67,23 +110,36 @@ function formatPercent(value: number | null) {
   return `${value >= 0 ? "+" : ""}${formatNumber(value)}%`;
 }
 
+function formatUsdCompact(value: number | null) {
+  if (value === null || Number.isNaN(value)) return "-";
+  return new Intl.NumberFormat("ko-KR", { currency: "USD", maximumFractionDigits: 1, notation: "compact", style: "currency" }).format(value);
+}
+
 function formatKrw(value: number | null) {
   if (value === null || Number.isNaN(value)) return "-";
-  return `${Math.round(value).toLocaleString("ko-KR")}원`;
+  return new Intl.NumberFormat("ko-KR", { currency: "KRW", maximumFractionDigits: 0, style: "currency" }).format(value);
 }
 
-function displaySymbol(symbol: string) {
-  return symbol.endsWith("USDT") ? symbol.slice(0, -4) : symbol;
+function formatUsdPrice(value: number | null) {
+  if (value === null || Number.isNaN(value)) return "-";
+  return `$${formatUsdt(value)}`;
 }
 
-function normalizeWatchSymbol(value: string) {
-  const cleaned = value.toUpperCase().replace(/[^A-Z0-9]/g, "");
-  if (!cleaned) return "";
-  return cleaned.endsWith("USDT") ? cleaned : `${cleaned}USDT`;
+function isStableCoin(coin: { symbol: string; name: string }) {
+  const symbol = coin.symbol.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return STABLE_SYMBOLS.has(symbol) || /stablecoin|\busd\b|dollar|\beuro\b/i.test(coin.name);
+}
+
+function formatDate(value: number | string) {
+  return new Intl.DateTimeFormat("ko-KR", { month: "short", day: "numeric" }).format(new Date(value));
+}
+
+function formatLaunchDate(value: string) {
+  return new Intl.DateTimeFormat("ko-KR", { year: "numeric", month: "short", day: "numeric" }).format(new Date(value));
 }
 
 function average(values: number[]) {
-  if (values.length === 0) return 0;
+  if (!values.length) return 0;
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
@@ -92,10 +148,14 @@ function calculateSma(values: number[], period: number) {
   return average(values.slice(-period));
 }
 
-function nearestFibLevel(position: number | null) {
-  if (position === null) return null;
-  const levels = [0, 23.6, 38.2, 50, 61.8, 78.6, 100];
-  return levels.reduce((nearest, level) => (Math.abs(level - position) < Math.abs(nearest - position) ? level : nearest), levels[0]);
+function calculateEma(values: number[], period: number) {
+  if (values.length < period) return null;
+  const multiplier = 2 / (period + 1);
+  let ema = average(values.slice(0, period));
+  for (let index = period; index < values.length; index += 1) {
+    ema = (values[index] - ema) * multiplier + ema;
+  }
+  return ema;
 }
 
 function calculateRsi(closes: number[], period = 14) {
@@ -122,173 +182,45 @@ function calculateRsi(closes: number[], period = 14) {
   return 100 - 100 / (1 + averageGain / averageLoss);
 }
 
-function calculateEma(values: number[], period: number) {
-  if (values.length < period) return null;
-  const multiplier = 2 / (period + 1);
-  let ema = average(values.slice(0, period));
-
-  for (let index = period; index < values.length; index += 1) {
-    ema = (values[index] - ema) * multiplier + ema;
+function calculateMacd(closes: number[]) {
+  if (closes.length < 35) return { macd: null, signal: null, histogram: null };
+  const macdSeries: number[] = [];
+  for (let end = 26; end <= closes.length; end += 1) {
+    const slice = closes.slice(0, end);
+    const ema12 = calculateEma(slice, 12);
+    const ema26 = calculateEma(slice, 26);
+    if (ema12 !== null && ema26 !== null) macdSeries.push(ema12 - ema26);
   }
-
-  return ema;
+  const macd = macdSeries[macdSeries.length - 1] ?? null;
+  const signal = calculateEma(macdSeries, 9);
+  return { macd, signal, histogram: macd !== null && signal !== null ? macd - signal : null };
 }
 
-function buildLiveSignal(coin: MarketCoin, timeframe: string, candles: BinanceCandle[]): SignalRecord {
-  const closes = candles.map((candle) => candle.close);
-  const times = candles.map((candle) => candle.openTime);
-  const volumes = candles.map((candle) => candle.volume);
-  const price = closes[closes.length - 1] ?? 0;
-  const previous = closes[closes.length - 2] ?? price;
-  const rsi = calculateRsi(closes);
-  const ema50 = calculateEma(closes, 50);
-  const ema200 = calculateEma(closes, 200);
-  const sma20w = calculateSma(closes, 140);
-  const yearlyHigh = Math.max(...candles.map((candle) => candle.high));
-  const yearlyLow = Math.min(...candles.map((candle) => candle.low));
-  const fibPosition = yearlyHigh > yearlyLow ? ((price - yearlyLow) / (yearlyHigh - yearlyLow)) * 100 : null;
-  const fibNearest = nearestFibLevel(fibPosition);
-  const recentAverageVolume = average(volumes.slice(-21, -1));
-  const volumeRatio = recentAverageVolume > 0 ? (volumes[volumes.length - 1] ?? 0) / recentAverageVolume : null;
-  const trendScore = ema50 !== null && ema200 !== null ? (price > ema50 && ema50 > ema200 ? 18 : price < ema50 && ema50 < ema200 ? -18 : 0) : 0;
-  const rsiScore = rsi === null ? 0 : rsi <= 30 ? 14 : rsi >= 70 ? -14 : rsi > 50 ? 6 : -6;
-  const volumeScore = volumeRatio !== null && volumeRatio >= 1.5 ? (price >= previous ? 8 : -8) : 0;
-  const score = Math.round(trendScore + rsiScore + volumeScore);
-  const direction = score >= LIVE_BUY_THRESHOLD ? "buy" : score <= LIVE_SELL_THRESHOLD ? "sell" : "neutral";
-  const reason =
-    direction === "buy"
-      ? `브라우저 실시간 계산: 상승 우위, RSI ${formatNumber(rsi)}, 거래량 ${formatNumber(volumeRatio)}x`
-      : direction === "sell"
-        ? `브라우저 실시간 계산: 하락 주의, RSI ${formatNumber(rsi)}, 거래량 ${formatNumber(volumeRatio)}x`
-        : `브라우저 실시간 계산: 중립, RSI ${formatNumber(rsi)}, 거래량 ${formatNumber(volumeRatio)}x`;
-
-  return {
-    id: `live-${coin.binanceSymbol}-${timeframe}`,
-    symbol: coin.binanceSymbol,
-    asset: coin.symbol,
-    coinName: coin.name,
-    marketCapRank: coin.marketCapRank,
-    timeframe,
-    direction,
-    score,
-    reason,
-    price,
-    rsi,
-    macd: null,
-    macdSignal: null,
-    ema50,
-    ema200,
-    volumeRatio,
-    candles: closes.slice(-365),
-    candleTimes: times.slice(-365),
-    components: {
-      sma20w: sma20w ?? 0,
-      fibPosition: fibPosition ?? 0,
-      fibNearest: fibNearest ?? 0,
-      yearlyHigh,
-      yearlyLow,
-    },
-    newsScore: 0,
-    newsArticleCount: 0,
-    createdAt: {
-      seconds: Math.floor(Date.now() / 1000),
-      nanoseconds: 0,
-    },
-  };
+function calculatePeriodChange(closes: number[], days: number) {
+  if (closes.length <= days) return null;
+  const current = closes[closes.length - 1];
+  const previous = closes[closes.length - 1 - days];
+  return previous ? ((current - previous) / previous) * 100 : null;
 }
 
-async function fetchBinanceTradingSymbols() {
-  const response = await fetch("https://api.binance.com/api/v3/exchangeInfo");
-  if (!response.ok) throw new Error(`Binance exchangeInfo failed: ${response.status}`);
-  const data = (await response.json()) as {
-    symbols: Array<{ symbol: string; quoteAsset: string; status: string; isSpotTradingAllowed: boolean }>;
-  };
-
-  return new Set(
-    data.symbols
-      .filter((symbol) => symbol.status === "TRADING" && symbol.quoteAsset === "USDT" && symbol.isSpotTradingAllowed)
-      .map((symbol) => symbol.symbol),
-  );
+function scoreNewsText(text: string) {
+  const positive = ["adoption", "approve", "approved", "breakthrough", "growth", "launch", "milestone", "partnership", "release", "upgrade"];
+  const negative = ["attack", "delay", "exploit", "hack", "lawsuit", "outage", "reject", "risk", "scam", "vulnerability"];
+  const normalized = text.toLowerCase();
+  const positiveHits = positive.filter((word) => normalized.includes(word)).length;
+  const negativeHits = negative.filter((word) => normalized.includes(word)).length;
+  return Math.max(-3, Math.min(3, positiveHits - negativeHits));
 }
 
-async function fetchTopMarketCapCoins() {
-  const url = new URL("https://api.coingecko.com/api/v3/coins/markets");
-  url.searchParams.set("vs_currency", "usd");
-  url.searchParams.set("order", "market_cap_desc");
-  url.searchParams.set("per_page", "50");
-  url.searchParams.set("page", "1");
-  url.searchParams.set("sparkline", "false");
-
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`CoinGecko top 50 failed: ${response.status}`);
-  const rows = (await response.json()) as Array<{
-    id: string;
-    name: string;
-    symbol: string;
-    market_cap_rank: number;
-  }>;
-
-  return rows
-    .map((row) => {
-      const symbol = row.symbol.toUpperCase();
-      return {
-        id: row.id,
-        name: row.name,
-        symbol,
-        marketCapRank: row.market_cap_rank,
-        binanceSymbol: `${symbol}USDT`,
-      };
-    })
-    .filter((coin) => !EXCLUDED_ASSETS.has(coin.symbol));
+function rangeDays(range: ChartRange) {
+  return CHART_RANGES.find((item) => item.value === range)?.days ?? 365;
 }
 
-async function fetchLiveSignal(coin: MarketCoin, timeframe = "1d") {
-  const url = new URL("https://api.binance.com/api/v3/klines");
-  url.searchParams.set("symbol", coin.binanceSymbol);
-  url.searchParams.set("interval", timeframe);
-  url.searchParams.set("limit", "365");
-
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Binance request failed: ${response.status}`);
-  const rows = (await response.json()) as Array<[number, string, string, string, string, string]>;
-  const candles = rows.map((row) => ({
-    openTime: Number(row[0]),
-    high: Number(row[2]),
-    low: Number(row[3]),
-    close: Number(row[4]),
-    volume: Number(row[5]),
-  }));
-
-  return buildLiveSignal(coin, timeframe, candles);
+function sliceByRange<T>(values: T[] | undefined, range: ChartRange) {
+  return values?.slice(-rangeDays(range)) ?? [];
 }
 
-async function mapLimit<T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>) {
-  const results: R[] = [];
-  let cursor = 0;
-
-  async function run() {
-    while (cursor < items.length) {
-      const index = cursor;
-      cursor += 1;
-      results[index] = await worker(items[index]);
-    }
-  }
-
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
-  return results;
-}
-
-async function fetchLiveTopSignals() {
-  const [coins, tradableSymbols] = await Promise.all([fetchTopMarketCapCoins(), fetchBinanceTradingSymbols()]);
-  const universe = coins.filter((coin) => tradableSymbols.has(coin.binanceSymbol));
-  const signals = await mapLimit(universe, 6, (coin) => fetchLiveSignal(coin));
-
-  return signals
-    .filter(Boolean)
-    .sort((left, right) => (left.marketCapRank ?? 999) - (right.marketCapRank ?? 999));
-}
-
-function chartPath(values: number[], width: number, height: number, padding = 8) {
+function chartPath(values: number[], width: number, height: number, padding = 14) {
   if (values.length < 2) return "";
   const min = Math.min(...values);
   const max = Math.max(...values);
@@ -305,590 +237,1010 @@ function chartPath(values: number[], width: number, height: number, padding = 8)
     .join(" ");
 }
 
-function monthMarkers(times: number[] | undefined, width: number, padding: number) {
-  if (!times || times.length < 2) return [];
+function monthMarkers(times: number[], width: number, padding: number) {
+  if (times.length < 2) return [];
   const usableWidth = width - padding * 2;
-
   return times
     .map((time, index) => {
       const date = new Date(time);
       const previous = index > 0 ? new Date(times[index - 1]) : null;
       if (index === 0 || !previous || date.getMonth() === previous.getMonth()) return null;
-      return {
-        x: padding + (index / (times.length - 1)) * usableWidth,
-        label: `${date.getMonth() + 1}월`,
-      };
+      return { x: padding + (index / (times.length - 1)) * usableWidth, label: `${date.getMonth() + 1}월` };
     })
     .filter((marker): marker is { x: number; label: string } => marker !== null);
 }
 
-function yearChange(values?: number[]) {
-  const first = values?.[0] ?? null;
-  const last = values?.[values.length - 1] ?? null;
-  return first && last ? ((last - first) / first) * 100 : null;
+function weekMarkers(times: number[], width: number, padding: number) {
+  if (times.length < 2) return [];
+  const usableWidth = width - padding * 2;
+  return times
+    .map((time, index) => {
+      const date = new Date(time);
+      if (index === 0 || date.getUTCDay() !== 1) return null;
+      return padding + (index / (times.length - 1)) * usableWidth;
+    })
+    .filter((x): x is number => x !== null);
 }
 
-function dayChange(values?: number[]) {
-  if (!values || values.length < 2) return null;
-  const last = values[values.length - 1];
-  const previous = values[values.length - 2];
-  return previous ? ((last - previous) / previous) * 100 : null;
-}
+function buildSignal(candles: Candle[], change24h: number | null, change7d: number | null, news: NewsItem[], devItems: DevItem[], networkInfo: NetworkInfo | null): DotSignal {
+  const closes = candles.map((candle) => candle.close);
+  const volumes = candles.map((candle) => candle.volume);
+  const price = closes[closes.length - 1] ?? 0;
+  const previous = closes[closes.length - 2] ?? price;
+  const rsi = calculateRsi(closes);
+  const ema50 = calculateEma(closes, 50);
+  const ema200 = calculateEma(closes, 200);
+  const sma20w = calculateSma(closes, 140);
+  const { histogram } = calculateMacd(closes);
+  const volumeRatio = average(volumes.slice(-21, -1)) ? (volumes[volumes.length - 1] ?? 0) / average(volumes.slice(-21, -1)) : null;
+  const reasons: string[] = [];
+  let score = 0;
 
-function rangeDays(range: ChartRange) {
-  return CHART_RANGES.find((item) => item.value === range)?.days ?? 365;
-}
+  if (rsi !== null) {
+    if (rsi <= 30) {
+      score += 22;
+      reasons.push(`RSI ${formatNumber(rsi)}: 과매도 구간이라 반등 후보`);
+    } else if (rsi >= 70) {
+      score -= 22;
+      reasons.push(`RSI ${formatNumber(rsi)}: 과열 구간이라 추격 매수 위험`);
+    } else {
+      reasons.push(`RSI ${formatNumber(rsi)}: 중립 구간`);
+    }
+  }
 
-function sliceByRange<T>(values: T[] | undefined, range: ChartRange) {
-  return values?.slice(-rangeDays(range));
-}
+  if (ema50 !== null && ema200 !== null) {
+    if (price > ema50 && ema50 > ema200) {
+      score += 20;
+      reasons.push("50일 추세선이 200일 추세선 위이고 현재가도 위라 장기 상승 흐름");
+    } else if (price < ema50 && ema50 < ema200) {
+      score -= 20;
+      reasons.push("50일 추세선이 200일 추세선 아래이고 현재가도 아래라 장기 하락 흐름");
+    } else {
+      reasons.push("50일·200일 추세선이 엇갈려 장기 방향이 아직 불분명");
+    }
+  }
 
-function indicatorText(signal: SignalRecord) {
-  const sma20w = signal.components?.sma20w ?? null;
-  const fibNearest = signal.components?.fibNearest ?? null;
-  const maState = sma20w && signal.price >= sma20w ? "20주선 위" : sma20w ? "20주선 아래" : "20주선 대기";
-  const fibText = fibNearest !== null ? `피보 ${formatNumber(fibNearest, 1)}%` : "피보 대기";
-  const volumeText = signal.volumeRatio !== null ? `거래량 평균의 ${formatNumber(signal.volumeRatio)}배` : "거래량 대기";
-  const newsText =
-    signal.newsArticleCount && signal.newsArticleCount > 0
-      ? `뉴스 ${formatNumber(signal.newsScore ?? 0, 0)} / ${signal.newsArticleCount}건`
-      : "뉴스 대기";
+  if (sma20w !== null) {
+    if (price > sma20w) {
+      score += 12;
+      reasons.push(`현재가가 20주 평균선 ${formatUsdt(sma20w)} USDT 위`);
+    } else {
+      score -= 12;
+      reasons.push(`현재가가 20주 평균선 ${formatUsdt(sma20w)} USDT 아래`);
+    }
+  }
+
+  if (histogram !== null) {
+    if (histogram > 0) {
+      score += 10;
+      reasons.push("단기 상승 힘이 하락 힘보다 강해지는 중");
+    } else {
+      score -= 10;
+      reasons.push("단기 하락 힘이 상승 힘보다 강한 상태");
+    }
+  }
+
+  if (volumeRatio !== null && volumeRatio >= 1.5) {
+    score += price >= previous ? 10 : -10;
+    reasons.push(`거래량이 20일 평균의 ${formatNumber(volumeRatio)}배로 커짐`);
+  }
+
+  if (change24h !== null) {
+    if (change24h >= 10) {
+      score += 8;
+      reasons.push("24시간 10% 이상 상승: 강한 수급 유입");
+    } else if (change24h <= -8) {
+      score -= 8;
+      reasons.push("24시간 낙폭이 커서 단기 하락 위험");
+    }
+  }
+
+  if (change7d !== null) {
+    if (change7d > 8) {
+      score += 6;
+      reasons.push(`Binance 7일 수익률 ${formatPercent(change7d)}: 단기 추세 강함`);
+    } else if (change7d < -8) {
+      score -= 6;
+      reasons.push(`Binance 7일 수익률 ${formatPercent(change7d)}: 단기 약세`);
+    }
+  }
+
+  const scoredNews = news.filter((item) => item.sentiment !== 0);
+  const newsBalance = scoredNews.reduce((sum, item) => sum + item.sentiment, 0);
+  if (newsBalance >= 2) {
+    score += Math.min(12, 4 + newsBalance * 2);
+    reasons.push(`DOT 뉴스 ${news.length}건 중 긍정 재료 우세: 전망에 가점`);
+  } else if (newsBalance <= -2) {
+    score -= Math.min(12, 4 + Math.abs(newsBalance) * 2);
+    reasons.push(`DOT 뉴스 ${news.length}건 중 부정 재료 우세: 전망에 감점`);
+  } else {
+    reasons.push(`DOT 뉴스 ${news.length}건: 뚜렷한 긍정·부정 우위 없음`);
+  }
+
+  const now = Date.now();
+  const recentDevItems = devItems.filter((item) => item.type === "commit" && now - new Date(item.date).getTime() <= 30 * 86_400_000);
+  const activeRepos = new Set(recentDevItems.map((item) => item.repo)).size;
+  if (activeRepos >= 2) {
+    score += 8;
+    reasons.push(`최근 30일 GitHub ${activeRepos}개 저장소에서 개발 지속: 전망에 가점`);
+  } else if (activeRepos === 1) {
+    score += 3;
+    reasons.push("최근 30일 GitHub 1개 저장소 활동 확인: 소폭 가점");
+  } else {
+    score -= 4;
+    reasons.push("최근 30일 추적 GitHub 활동이 없어 개발 모멘텀 감점");
+  }
+
+  if (networkInfo) {
+    const finalityGap = networkInfo.bestBlock - networkInfo.finalizedBlock;
+    if (networkInfo.syncing || finalityGap > 5) {
+      score -= 12;
+      reasons.push(`네트워크 확정 지연 ${formatNumber(finalityGap, 0)}블록: 운영 위험 감점`);
+    } else {
+      score += 2;
+      reasons.push(`네트워크 정상: 최신 블록과 확정 블록 차이 ${formatNumber(finalityGap, 0)}개`);
+    }
+  }
+
+  const direction: SignalDirection = score >= 35 ? "buy" : score <= -35 ? "risk" : "neutral";
   return {
-    maState,
-    fibText,
-    volumeText,
-    newsText,
-    rsiText: signal.rsi !== null ? `RSI ${formatNumber(signal.rsi)}` : "RSI 대기",
+    direction,
+    score: Math.round(score),
+    label: direction === "buy" ? "매수" : direction === "risk" ? "매도" : "관망",
+    reasons,
   };
 }
 
-function buyReason(signal: SignalRecord) {
-  const sma20w = signal.components?.sma20w ?? null;
-  const fibNearest = signal.components?.fibNearest ?? null;
-  const reasons = [];
-
-  if (sma20w) {
-    reasons.push(signal.price >= sma20w ? `현재가가 20주 평균선(${formatNumber(sma20w, 4)} USDT) 위` : "현재가가 20주 평균선 아래");
+async function fetchBinanceJson(path: string) {
+  const errors: string[] = [];
+  for (const base of BINANCE_BASES) {
+    const response = await fetch(`${base}${path}`, { headers: { accept: "application/json" } });
+    if (response.ok) return response.json();
+    errors.push(`${base} ${response.status}`);
   }
-
-  if (signal.rsi !== null) {
-    if (signal.rsi < 30) reasons.push(`RSI ${formatNumber(signal.rsi)} 과매도`);
-    else if (signal.rsi < 70) reasons.push(`RSI ${formatNumber(signal.rsi)} 과열 전`);
-    else reasons.push(`RSI ${formatNumber(signal.rsi)} 과열 주의`);
-  }
-
-  if (fibNearest !== null) {
-    reasons.push(`1년 고저점 기준 피보나치 ${formatNumber(fibNearest, 1)}% 부근`);
-  }
-
-  if (signal.volumeRatio !== null) {
-    reasons.push(`거래량은 최근 평균의 ${formatNumber(signal.volumeRatio)}배`);
-  }
-
-  return reasons.join(" · ");
+  throw new Error(`Binance 데이터 요청 실패: ${errors.join(", ")}`);
 }
 
-function Sparkline({ values, times, large = false }: { values?: number[]; times?: number[]; large?: boolean }) {
-  const width = large ? 960 : 280;
-  const height = large ? 240 : 64;
-  const padding = large ? 18 : 7;
-  const path = chartPath(values ?? [], width, height, padding);
-  const last = values?.[values.length - 1] ?? null;
-  const change = yearChange(values);
-  const color = change !== null && change >= 0 ? "#0f8b72" : "#df5b50";
+async function fetchCandles() {
+  const rows = (await fetchBinanceJson(`/api/v3/klines?symbol=${SYMBOL}&interval=1d&limit=365`)) as Array<[number, string, string, string, string, string]>;
+  return rows.map((row) => ({
+    openTime: Number(row[0]),
+    high: Number(row[2]),
+    low: Number(row[3]),
+    close: Number(row[4]),
+    volume: Number(row[5]),
+  }));
+}
+
+async function fetchTicker24h() {
+  const row = (await fetchBinanceJson(`/api/v3/ticker/24hr?symbol=${SYMBOL}`)) as { lastPrice: string; priceChangePercent: string; volume: string; quoteVolume: string };
+  return {
+    price: Number(row.lastPrice),
+    changePercent: Number(row.priceChangePercent),
+    volume: Number(row.volume),
+    quoteVolume: Number(row.quoteVolume),
+  };
+}
+
+async function fetchUsdKrw(): Promise<FxRate> {
+  const sources = [
+    {
+      url: "https://open.er-api.com/v6/latest/USD",
+      parse: (data: { rates?: { KRW?: number }; time_last_update_utc?: string }) => ({
+        rate: data.rates?.KRW ?? 0,
+        date: data.time_last_update_utc ?? new Date().toISOString(),
+      }),
+    },
+    {
+      url: "https://api.frankfurter.app/latest?from=USD&to=KRW",
+      parse: (data: { rates?: { KRW?: number }; date?: string }) => ({
+        rate: data.rates?.KRW ?? 0,
+        date: data.date ?? new Date().toISOString(),
+      }),
+    },
+  ];
+
+  for (const source of sources) {
+    try {
+      const response = await fetch(source.url, { headers: { accept: "application/json" } });
+      if (!response.ok) continue;
+      const parsed = source.parse(await response.json());
+      if (parsed.rate > 0) return parsed;
+    } catch {
+      // Try the next public exchange-rate source.
+    }
+  }
+  throw new Error("USD/KRW 환율을 불러오지 못했습니다.");
+}
+
+async function polkadotRpc<T>(method: string, params: unknown[] = []): Promise<T> {
+  const response = await fetch("https://rpc.polkadot.io", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id: 1, jsonrpc: "2.0", method, params }),
+  });
+  if (!response.ok) throw new Error(`Polkadot RPC 요청 실패: ${response.status}`);
+  const data = (await response.json()) as { result?: T; error?: { message?: string } };
+  if (data.error || data.result === undefined) throw new Error(data.error?.message || `${method} 응답 오류`);
+  return data.result;
+}
+
+async function fetchNetworkInfo(): Promise<NetworkInfo> {
+  const [health, bestHeader, finalizedHash, runtime] = await Promise.all([
+    polkadotRpc<{ peers: number; isSyncing: boolean }>("system_health"),
+    polkadotRpc<{ number: string }>("chain_getHeader"),
+    polkadotRpc<string>("chain_getFinalizedHead"),
+    polkadotRpc<{ specVersion: number }>("state_getRuntimeVersion"),
+  ]);
+  const finalizedHeader = await polkadotRpc<{ number: string }>("chain_getHeader", [finalizedHash]);
+  return {
+    peers: health.peers,
+    syncing: health.isSyncing,
+    bestBlock: Number.parseInt(bestHeader.number, 16),
+    finalizedBlock: Number.parseInt(finalizedHeader.number, 16),
+    runtimeVersion: runtime.specVersion,
+  };
+}
+
+async function fetchNews(): Promise<NewsItem[]> {
+  try {
+    const response = await fetch("https://min-api.cryptocompare.com/data/v2/news/?lang=EN", {
+      headers: { accept: "application/json" },
+    });
+    if (!response.ok) throw new Error("news failed");
+    const data = (await response.json()) as {
+      Data?: Array<{ body?: string; id: string; title: string; source_info?: { name?: string }; url: string; published_on: number }>;
+    };
+    const rows = data.Data ?? [];
+    const filtered = rows.filter((item) => /polkadot|\bdot\b|parity|web3 foundation/i.test(`${item.title} ${item.body ?? ""}`));
+    return filtered.slice(0, 8).map((item) => ({
+        id: item.id,
+        title: item.title,
+        source: item.source_info?.name ?? "CryptoCompare",
+        url: item.url,
+        publishedAt: item.published_on * 1000,
+        sentiment: scoreNewsText(`${item.title} ${item.body ?? ""}`),
+      }));
+  } catch {
+    return [
+      {
+        id: "polkadot-blog",
+        title: "Polkadot 공식 블로그에서 최신 생태계 소식 확인",
+        source: "Polkadot",
+        url: "https://polkadot.com/blog",
+        publishedAt: Date.now(),
+        sentiment: 0,
+      },
+      {
+        id: "polkadot-forum",
+        title: "Polkadot Forum에서 거버넌스와 개발 논의 확인",
+        source: "Polkadot Forum",
+        url: "https://forum.polkadot.network/",
+        publishedAt: Date.now(),
+        sentiment: 0,
+      },
+    ];
+  }
+}
+
+async function fetchMarketInfo(): Promise<DotMarketInfo> {
+  const url = new URL("https://api.coingecko.com/api/v3/coins/markets");
+  url.searchParams.set("vs_currency", "usd");
+  url.searchParams.set("order", "market_cap_desc");
+  url.searchParams.set("per_page", "250");
+  url.searchParams.set("page", "1");
+  url.searchParams.set("sparkline", "false");
+  const response = await fetch(url, { headers: { accept: "application/json" } });
+  if (!response.ok) throw new Error(`CoinGecko DOT 데이터 요청 실패: ${response.status}`);
+  const rows = (await response.json()) as Array<{
+    id: string;
+    symbol: string;
+    name: string;
+    market_cap: number | null;
+    circulating_supply: number | null;
+    total_supply: number | null;
+  }>;
+  const withoutStablecoins = rows.filter((coin) => !isStableCoin(coin));
+  const dotIndex = withoutStablecoins.findIndex((coin) => coin.id === "polkadot");
+  const dot = withoutStablecoins[dotIndex];
+  if (!dot || dotIndex < 0) throw new Error("스테이블 코인 제외 순위에서 DOT를 찾지 못했습니다.");
+
+  return {
+    rank: dotIndex + 1,
+    marketCap: dot.market_cap ?? null,
+    circulatingSupply: dot.circulating_supply ?? null,
+    totalSupply: dot.total_supply ?? null,
+  };
+}
+
+async function fetchEcosystemProjects(): Promise<EcosystemProject[]> {
+  const url = new URL("https://api.coingecko.com/api/v3/coins/markets");
+  url.searchParams.set("vs_currency", "usd");
+  url.searchParams.set("category", "dot-ecosystem");
+  url.searchParams.set("order", "market_cap_desc");
+  url.searchParams.set("per_page", "50");
+  url.searchParams.set("page", "1");
+  url.searchParams.set("sparkline", "false");
+  url.searchParams.set("price_change_percentage", "24h");
+  const response = await fetch(url, { headers: { accept: "application/json" } });
+  if (!response.ok) throw new Error(`Polkadot 생태계 요청 실패: ${response.status}`);
+  const rows = (await response.json()) as Array<{
+    id: string;
+    name: string;
+    symbol: string;
+    image: string;
+    current_price: number | null;
+    market_cap: number | null;
+    price_change_percentage_24h: number | null;
+  }>;
+  const projects: EcosystemProject[] = rows
+    .filter((coin) => coin.id !== "polkadot" && !isStableCoin(coin))
+    .slice(0, 20)
+    .map((coin) => ({
+      id: coin.id,
+      name: coin.name,
+      symbol: coin.symbol.toUpperCase(),
+      image: coin.image,
+      price: coin.current_price,
+      marketCap: coin.market_cap,
+      change24h: coin.price_change_percentage_24h,
+      launchDate: null,
+      description: "",
+      dotHoldings: null,
+    }));
+
+  const cacheKey = "dot-ecosystem-details-v2-ko";
+  const cached = JSON.parse(window.localStorage.getItem(cacheKey) ?? "{}") as Record<
+    string,
+    { launchDate: string | null; description: string; cachedAt: number }
+  >;
+  const cacheMaxAge = 24 * 60 * 60_000;
+
+  await Promise.all(
+    projects.map(async (project) => {
+        const saved = cached[project.id];
+        if (saved && Date.now() - saved.cachedAt < cacheMaxAge) {
+          project.launchDate = saved.launchDate;
+          project.description = saved.description;
+          return;
+        }
+
+        try {
+          const detailUrl = new URL(`https://api.coingecko.com/api/v3/coins/${project.id}`);
+          detailUrl.searchParams.set("localization", "true");
+          detailUrl.searchParams.set("tickers", "false");
+          detailUrl.searchParams.set("market_data", "false");
+          detailUrl.searchParams.set("community_data", "false");
+          detailUrl.searchParams.set("developer_data", "false");
+          detailUrl.searchParams.set("sparkline", "false");
+          const detailResponse = await fetch(detailUrl, {
+            headers: { accept: "application/json" },
+            signal: AbortSignal.timeout(5_000),
+          });
+          if (!detailResponse.ok) return;
+          const detail = (await detailResponse.json()) as { genesis_date?: string | null; description?: { ko?: string } };
+          const parsed = new DOMParser().parseFromString(detail.description?.ko ?? "", "text/html").body.textContent ?? "";
+          const description = parsed.replace(/\s+/g, " ").trim();
+          project.launchDate = detail.genesis_date ?? null;
+          project.description = description;
+          cached[project.id] = { launchDate: project.launchDate, description, cachedAt: Date.now() };
+        } catch {
+          // Individual project details may be unavailable due to public API rate limits.
+        }
+      }),
+  );
+
+  window.localStorage.setItem(cacheKey, JSON.stringify(cached));
+  return projects;
+}
+
+async function fetchNewEcosystemProjects(currentProjects: EcosystemProject[]): Promise<NewEcosystemProject[]> {
+  const [{ collection, getDocs }, { db }] = await Promise.all([import("firebase/firestore"), import("./firebase")]);
+  if (db) {
+    try {
+      const snapshot = await getDocs(collection(db, "ecosystemProjects"));
+      if (!snapshot.empty) {
+        const cutoff = Date.now() - 90 * 86_400_000;
+        return snapshot.docs
+          .map((document) => {
+            const data = document.data() as {
+              name?: string;
+              symbol?: string;
+              image?: string;
+              price?: number | null;
+              marketCap?: number | null;
+              change24h?: number | null;
+              firstSeen?: { toMillis?: () => number };
+              isBaseline?: boolean;
+            };
+            const current = currentProjects.find((project) => project.id === document.id);
+            return {
+              id: document.id,
+              name: data.name ?? document.id,
+              symbol: data.symbol ?? "-",
+              image: data.image ?? "",
+              price: data.price ?? null,
+              marketCap: data.marketCap ?? null,
+              change24h: data.change24h ?? null,
+              launchDate: current?.launchDate ?? null,
+              description: current?.description ?? "",
+              dotHoldings: current?.dotHoldings ?? null,
+              firstSeen: data.firstSeen?.toMillis?.() ?? 0,
+              isBaseline: data.isBaseline ?? true,
+            };
+          })
+          .filter((project) => !project.isBaseline && project.firstSeen >= cutoff)
+          .sort((left, right) => right.firstSeen - left.firstSeen)
+          .slice(0, 6);
+      }
+    } catch {
+      // Fall back to this browser's previous category snapshot until Firestore rules are deployed.
+    }
+  }
+
+  const storageKey = "dot-ecosystem-known-projects-v1";
+  const saved = window.localStorage.getItem(storageKey);
+  const currentIds = currentProjects.map((project) => project.id);
+  if (!saved) {
+    window.localStorage.setItem(storageKey, JSON.stringify(currentIds));
+    return [];
+  }
+  const knownIds = new Set<string>(JSON.parse(saved) as string[]);
+  const added = currentProjects.filter((project) => !knownIds.has(project.id));
+  window.localStorage.setItem(storageKey, JSON.stringify([...new Set([...knownIds, ...currentIds])]));
+  return added.map((project) => ({ ...project, firstSeen: Date.now() })).slice(0, 6);
+}
+
+async function fetchDevStatus(): Promise<DevItem[]> {
+  const repoItems = await Promise.all(
+    DEV_REPOS.map(async (repoInfo) => {
+      const repoPath = `${repoInfo.owner}/${repoInfo.repo}`;
+      const [commitsResponse, releasesResponse] = await Promise.all([
+        fetch(`https://api.github.com/repos/${repoPath}/commits?per_page=4`, { headers: { accept: "application/vnd.github+json" } }),
+        fetch(`https://api.github.com/repos/${repoPath}/releases?per_page=1`, { headers: { accept: "application/vnd.github+json" } }),
+      ]);
+      const commits = commitsResponse.ok
+        ? ((await commitsResponse.json()) as Array<{ sha: string; html_url: string; commit: { message: string; author?: { date?: string } } }>)
+        : [];
+      const releases = releasesResponse.ok
+        ? ((await releasesResponse.json()) as Array<{ id: number; html_url: string; name?: string; tag_name: string; published_at?: string }>)
+        : [];
+
+      return [
+        ...releases.map((item) => ({
+          id: `${repoPath}-release-${item.id}`,
+          repo: repoInfo.repo,
+          title: item.name || item.tag_name,
+          url: item.html_url,
+          date: item.published_at ?? new Date().toISOString(),
+          type: "release" as const,
+        })),
+        ...commits.map((item) => ({
+          id: `${repoPath}-${item.sha}`,
+          repo: repoInfo.repo,
+          title: item.commit.message.split("\n")[0],
+          url: item.html_url,
+          date: item.commit.author?.date ?? new Date().toISOString(),
+          type: "commit" as const,
+        })),
+      ];
+    }),
+  );
+
+  return repoItems
+    .flat()
+    .sort((left, right) => new Date(right.date).getTime() - new Date(left.date).getTime())
+    .slice(0, 15);
+}
+
+function DotChart({ candles, range }: { candles: Candle[]; range: ChartRange }) {
+  const width = 960;
+  const height = 250;
+  const padding = 18;
+  const visibleCandles = sliceByRange(candles, range);
+  const values = visibleCandles.map((candle) => candle.close);
+  const times = visibleCandles.map((candle) => candle.openTime);
+  const path = chartPath(values, width, height, padding);
   const markers = monthMarkers(times, width, padding);
+  const weeklyMarkers = weekMarkers(times, width, padding);
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const selectedCandle = selectedIndex !== null ? visibleCandles[selectedIndex] ?? null : null;
+  const first = values[0] ?? null;
+  const last = values[values.length - 1] ?? null;
+  const min = values.length ? Math.min(...values) : null;
+  const max = values.length ? Math.max(...values) : null;
+  const change = first && last ? ((last - first) / first) * 100 : null;
+  const stroke = change !== null && change >= 0 ? "#36e7b8" : "#ff746b";
+  const areaPath = path ? `${path} L ${width - padding} ${height - padding} L ${padding} ${height - padding} Z` : "";
+  const currentY = last !== null && min !== null && max !== null ? padding + (1 - (last - min) / (max - min || 1)) * (height - padding * 2) : height / 2;
+  const currentTop = Math.max(8, Math.min(88, (currentY / height) * 100));
+  const selectedX = selectedIndex !== null && visibleCandles.length > 1 ? padding + (selectedIndex / (visibleCandles.length - 1)) * (width - padding * 2) : null;
+  const selectedY = selectedCandle !== null && min !== null && max !== null ? padding + (1 - (selectedCandle.close - min) / (max - min || 1)) * (height - padding * 2) : null;
 
   return (
-    <div className={large ? "chartBox large" : "chartBox mini"}>
-      {large && (
-        <div className="chartHeader">
-          <div>
-            <strong>{last ? `${formatNumber(last, 4)} USDT` : "-"}</strong>
-            <span>선택 기간 일봉 · 월 표시</span>
-          </div>
-          <b className={change !== null && change >= 0 ? "positive" : "negative"}>{formatPercent(change)}</b>
+    <section className="panel chartPanel">
+      <div className="chartHeader">
+        <div>
+          <span>DOT 가격 추이</span>
+          <strong>{last ? `${formatUsdt(last)} USDT` : "-"}</strong>
+          <small>고가 {formatUsdt(max)} · 저가 {formatUsdt(min)}</small>
         </div>
-      )}
-      {path ? (
-        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="가격 추세 그래프" preserveAspectRatio="none">
-          <path className="chartGrid" d={`M 0 ${height - 1} L ${width} ${height - 1}`} />
-          {markers.map((marker) => (
-            <g key={`${marker.label}-${marker.x}`}>
-              <path className="chartMonthLine" d={`M ${marker.x.toFixed(2)} 0 L ${marker.x.toFixed(2)} ${height}`} />
-              {large && (
-                <text className="chartMonthLabel" x={marker.x + 4} y={14}>
-                  {marker.label}
-                </text>
-              )}
-            </g>
+        <b className={change !== null && change >= 0 ? "positive" : "negative"}>{formatPercent(change)}</b>
+      </div>
+      <div className="chartCanvas">
+        <svg
+          viewBox={`0 0 ${width} ${height}`}
+          role="img"
+          aria-label="DOT 가격 차트. 누르면 해당 날짜의 시세와 거래량을 확인할 수 있습니다."
+          preserveAspectRatio="none"
+          onPointerDown={(event) => {
+            if (!visibleCandles.length) return;
+            const rect = event.currentTarget.getBoundingClientRect();
+            const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+            setSelectedIndex(Math.round(ratio * (visibleCandles.length - 1)));
+          }}
+        >
+          <defs>
+            <linearGradient id="dotAreaGradient" x1="0" x2="0" y1="0" y2="1">
+              <stop offset="0%" stopColor={stroke} stopOpacity="0.3" />
+              <stop offset="72%" stopColor={stroke} stopOpacity="0.05" />
+              <stop offset="100%" stopColor={stroke} stopOpacity="0" />
+            </linearGradient>
+          </defs>
+          {[0.25, 0.5, 0.75, 1].map((ratio) => (
+            <path className="chartGrid" d={`M 0 ${height * ratio} L ${width} ${height * ratio}`} key={ratio} />
           ))}
-          <path d={path} fill="none" stroke={color} strokeWidth={large ? 3 : 2.1} strokeLinecap="round" strokeLinejoin="round" />
+          {weeklyMarkers.map((x) => (
+            <path className="chartWeekLine" d={`M ${x.toFixed(2)} 0 L ${x.toFixed(2)} ${height}`} key={`week-${x}`} />
+          ))}
+          {markers.map((marker) => (
+            <path className="chartMonthLine" d={`M ${marker.x.toFixed(2)} 0 L ${marker.x.toFixed(2)} ${height}`} key={`${marker.label}-${marker.x}`} />
+          ))}
+          <path d={areaPath} fill="url(#dotAreaGradient)" />
+          <path className="priceLine" d={path} fill="none" stroke={stroke} strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" />
+          {selectedX !== null && selectedY !== null && (
+            <>
+              <path className="chartSelectionLine" d={`M ${selectedX} 0 L ${selectedX} ${height}`} />
+              <circle className="chartSelectionDot" cx={selectedX} cy={selectedY} fill={stroke} r="5" />
+            </>
+          )}
         </svg>
-      ) : (
-        <div className="chartEmpty">차트 대기</div>
-      )}
-    </div>
+        <div className={`chartMonthAxis ${markers.length > 6 ? "dense" : ""}`} aria-hidden="true">
+          {markers.map((marker) => (
+            <span key={`${marker.label}-axis-${marker.x}`} style={{ left: `${(marker.x / width) * 100}%` }}>
+              {marker.label}
+            </span>
+          ))}
+        </div>
+        {last !== null && (
+          <span className="currentPriceTag" style={{ top: `${currentTop}%`, borderColor: stroke, color: stroke }}>
+            {formatUsdt(last)}
+          </span>
+        )}
+        {selectedCandle && selectedX !== null && (
+          <div className={`chartTooltip ${selectedX / width > 0.72 ? "alignRight" : ""}`} style={{ left: `${(selectedX / width) * 100}%` }}>
+            <b>{new Intl.DateTimeFormat("ko-KR", { year: "numeric", month: "short", day: "numeric" }).format(new Date(selectedCandle.openTime))}</b>
+            <span>종가 <strong>{formatUsdt(selectedCandle.close)} USDT</strong></span>
+            <span>거래량 <strong>{formatNumber(selectedCandle.volume, 0)} DOT</strong></span>
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 
 export default function App() {
-  const [signals, setSignals] = useState<SignalRecord[]>([]);
-  const [serverSignals, setServerSignals] = useState<SignalRecord[]>([]);
-  const [user, setUser] = useState<User | null>(null);
-  const [authBusy, setAuthBusy] = useState(false);
-  const [liveError, setLiveError] = useState<string | null>(null);
-  const [usdKrw, setUsdKrw] = useState<number | null>(null);
-  const [activeView, setActiveView] = useState<"dashboard" | "markets" | "settings">("dashboard");
-  const [coinInput, setCoinInput] = useState("");
-  const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
-  const [chartRange, setChartRange] = useState<ChartRange>("1y");
-  const [watchSymbols, setWatchSymbols] = useState<string[]>(() => {
+  const [candles, setCandles] = useState<Candle[]>([]);
+  const [ticker, setTicker] = useState<{ price: number; changePercent: number; volume: number; quoteVolume: number } | null>(null);
+  const [news, setNews] = useState<NewsItem[]>([]);
+  const [devItems, setDevItems] = useState<DevItem[]>([]);
+  const [marketInfo, setMarketInfo] = useState<DotMarketInfo | null>(null);
+  const [fxRate, setFxRate] = useState<FxRate | null>(null);
+  const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
+  const [ecosystemProjects, setEcosystemProjects] = useState<EcosystemProject[]>([]);
+  const [newEcosystemProjects, setNewEcosystemProjects] = useState<NewEcosystemProject[]>([]);
+  const [range, setRange] = useState<ChartRange>("3m");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
+
+  const indicator = useMemo(() => {
+    const closes = candles.map((candle) => candle.close);
+    const volumes = candles.map((candle) => candle.volume);
+    const price = ticker?.price ?? closes[closes.length - 1] ?? null;
+    const sma20w = calculateSma(closes, 140);
+    const ema50 = calculateEma(closes, 50);
+    const ema200 = calculateEma(closes, 200);
+    const rsi = calculateRsi(closes);
+    const macd = calculateMacd(closes);
+    const volumeRatio = average(volumes.slice(-21, -1)) ? (volumes[volumes.length - 1] ?? 0) / average(volumes.slice(-21, -1)) : null;
+    const change7d = calculatePeriodChange(closes, 7);
+    const change30d = calculatePeriodChange(closes, 30);
+    const yearlyHigh = candles.length ? Math.max(...candles.map((candle) => candle.high)) : null;
+    const yearlyLow = candles.length ? Math.min(...candles.map((candle) => candle.low)) : null;
+    const fibPosition = price !== null && yearlyHigh !== null && yearlyLow !== null && yearlyHigh > yearlyLow ? ((price - yearlyLow) / (yearlyHigh - yearlyLow)) * 100 : null;
+    const signal = buildSignal(candles, ticker?.changePercent ?? null, change7d, news, devItems, networkInfo);
+
+    return { price, sma20w, ema50, ema200, rsi, macd, volumeRatio, yearlyHigh, yearlyLow, fibPosition, change7d, change30d, signal };
+  }, [candles, devItems, networkInfo, news, ticker]);
+
+  async function loadData() {
+    setLoading(true);
+    setError(null);
     try {
-      const saved = window.localStorage.getItem(WATCHLIST_STORAGE_KEY);
-      return saved ? (JSON.parse(saved) as string[]) : [];
-    } catch {
-      return [];
-    }
-  });
-  const latest = useMemo(() => signals.find((signal) => signal.symbol === selectedSymbol) ?? signals[0], [selectedSymbol, signals]);
-  const watchedSignalSymbols = useMemo(() => new Set(watchSymbols), [watchSymbols]);
-  const signalSource = serverSignals.length ? serverSignals : signals;
-  const watchedSignals = useMemo(
-    () => signalSource.filter((signal) => watchedSignalSymbols.has(signal.symbol)),
-    [signalSource, watchedSignalSymbols],
-  );
-  const buySignals = useMemo(() => watchedSignals.filter((signal) => signal.direction === "buy"), [watchedSignals]);
-  const sellSignals = useMemo(() => watchedSignals.filter((signal) => signal.direction === "sell"), [watchedSignals]);
+      const [candlesResult, tickerResult, newsResult, devResult, marketResult, fxResult, networkResult, ecosystemResult] = await Promise.allSettled([
+        fetchCandles(),
+        fetchTicker24h(),
+        fetchNews(),
+        fetchDevStatus(),
+        fetchMarketInfo(),
+        fetchUsdKrw(),
+        fetchNetworkInfo(),
+        fetchEcosystemProjects(),
+      ] as const);
 
-  useEffect(() => {
-    if (!auth) return undefined;
-    return onAuthStateChanged(auth, setUser);
-  }, []);
-
-  useEffect(() => {
-    if (!user || !db) {
-      window.localStorage.setItem(WATCHLIST_STORAGE_KEY, JSON.stringify(watchSymbols));
-    }
-  }, [user, watchSymbols]);
-
-  useEffect(() => {
-    if (!user || !db) return undefined;
-    const watchlistRef = doc(db, "users", user.uid, "settings", "watchlist");
-
-    return onSnapshot(watchlistRef, async (snapshot) => {
-      const symbols = snapshot.exists() ? snapshot.data().symbols : null;
-      if (Array.isArray(symbols)) {
-        setWatchSymbols(symbols.filter((symbol): symbol is string => typeof symbol === "string"));
-        return;
+      if (candlesResult.status === "fulfilled") setCandles(candlesResult.value);
+      if (tickerResult.status === "fulfilled") setTicker(tickerResult.value);
+      if (newsResult.status === "fulfilled") setNews(newsResult.value);
+      if (devResult.status === "fulfilled") setDevItems(devResult.value);
+      if (marketResult.status === "fulfilled") setMarketInfo(marketResult.value);
+      if (fxResult.status === "fulfilled") setFxRate(fxResult.value);
+      if (networkResult.status === "fulfilled") setNetworkInfo(networkResult.value);
+      if (ecosystemResult.status === "fulfilled") {
+        setEcosystemProjects(ecosystemResult.value);
+        setNewEcosystemProjects(await fetchNewEcosystemProjects(ecosystemResult.value).catch(() => []));
       }
 
-      const saved = window.localStorage.getItem(WATCHLIST_STORAGE_KEY);
-      const localSymbols = saved ? (JSON.parse(saved) as string[]) : [];
-      if (localSymbols.length) {
-        await setDoc(watchlistRef, {
-          symbols: localSymbols,
-          updatedAt: serverTimestamp(),
-        });
-      }
-    });
-  }, [user]);
-
-  useEffect(() => {
-    let active = true;
-
-    async function loadExchangeRate() {
-      try {
-        const response = await fetch("https://open.er-api.com/v6/latest/USD");
-        if (!response.ok) throw new Error(`exchange rate failed: ${response.status}`);
-        const data = (await response.json()) as { rates?: { KRW?: number } };
-        if (active && data.rates?.KRW) setUsdKrw(data.rates.KRW);
-      } catch {
-        if (active) setUsdKrw(null);
-      }
-    }
-
-    loadExchangeRate();
-    const timer = window.setInterval(loadExchangeRate, 30 * 60_000);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-    };
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-
-    async function loadLivePrices() {
-      try {
-        const liveSignals = await fetchLiveTopSignals();
-        if (active) {
-          setSignals(liveSignals);
-          setLiveError(null);
-        }
-      } catch (error) {
-        if (active) setLiveError(error instanceof Error ? error.message : "실시간 데이터를 불러오지 못했습니다.");
-      }
-    }
-
-    loadLivePrices();
-    const timer = window.setInterval(loadLivePrices, 60_000);
-    const unsubscribe = db
-      ? onSnapshot(collection(db, "signals"), (snapshot) => {
-          const serverSignals = snapshot.docs
-            .map((item) => ({
-              id: item.id,
-              ...(item.data() as Omit<SignalRecord, "id">),
-            }))
-            .filter((signal) => Array.isArray(signal.candles) && signal.candles.length > 1)
-            .sort((left, right) => (left.marketCapRank ?? 999) - (right.marketCapRank ?? 999));
-
-          if (active) setServerSignals(serverSignals);
-        })
-      : undefined;
-
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-      unsubscribe?.();
-    };
-  }, []);
-
-  async function handleGoogleLogin() {
-    if (!auth) return;
-    setAuthBusy(true);
-    try {
-      const provider = new GoogleAuthProvider();
-      provider.setCustomParameters({ prompt: "select_account" });
-      await signInWithPopup(auth, provider);
+      const failures = [
+        ["가격 차트", candlesResult],
+        ["현재가", tickerResult],
+        ["뉴스", newsResult],
+        ["개발 현황", devResult],
+        ["시가총액", marketResult],
+        ["환율", fxResult],
+        ["네트워크", networkResult],
+        ["생태계", ecosystemResult],
+      ].flatMap(([name, result]) => (typeof result === "object" && result.status === "rejected" ? [name as string] : []));
+      if (failures.length) setError(`일부 데이터 갱신 실패: ${failures.join(", ")}`);
+      if (candlesResult.status === "fulfilled" || tickerResult.status === "fulfilled") setUpdatedAt(new Date());
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "DOT 데이터를 불러오지 못했습니다.");
     } finally {
-      setAuthBusy(false);
+      setLoading(false);
     }
   }
 
-  async function handleLogout() {
-    if (!auth) return;
-    setAuthBusy(true);
-    try {
-      await signOut(auth);
-    } finally {
-      setAuthBusy(false);
-    }
-  }
-
-  async function saveWatchSymbols(next: string[]) {
-    setWatchSymbols(next);
-    if (user && db) {
-      await setDoc(doc(db, "users", user.uid, "settings", "watchlist"), {
-        symbols: next,
-        updatedAt: serverTimestamp(),
-      });
-    } else {
-      window.localStorage.setItem(WATCHLIST_STORAGE_KEY, JSON.stringify(next));
-    }
-  }
-
-  function addWatchSymbol(value: string) {
-    const symbol = normalizeWatchSymbol(value);
-    if (!symbol) return;
-    void saveWatchSymbols(watchSymbols.includes(symbol) ? watchSymbols : [...watchSymbols, symbol]);
-    setCoinInput("");
-  }
-
-  function removeWatchSymbol(symbol: string) {
-    void saveWatchSymbols(watchSymbols.filter((item) => item !== symbol));
-    if (selectedSymbol === symbol) setSelectedSymbol(null);
-  }
-
-  const navButtons = (
-    <>
-      <button className={activeView === "dashboard" ? "active" : ""} type="button" title="대시보드" onClick={() => setActiveView("dashboard")}>
-        <Activity size={18} />
-        <span>대시보드</span>
-      </button>
-      <button className={activeView === "markets" ? "active" : ""} type="button" title="Top 50" onClick={() => setActiveView("markets")}>
-        <Radio size={18} />
-        <span>Top 50</span>
-      </button>
-      <button className={activeView === "settings" ? "active" : ""} type="button" title="설정" onClick={() => setActiveView("settings")}>
-        <Settings size={18} />
-        <span>설정</span>
-      </button>
-    </>
-  );
+  useEffect(() => {
+    void loadData();
+    const timer = window.setInterval(() => void loadData(), 10 * 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   return (
-    <main className="appShell">
-      <header className="mobileHeader">
-        <div className="brand">
-          <CandlestickChart size={23} />
-          <div>
-            <strong>Coin Signal</strong>
-            <span>Kakao alert bot</span>
-          </div>
+    <main className="dotShell">
+      <header className="heroPanel">
+        <div>
+          <span className="eyebrow">Polkadot only</span>
         </div>
-        {user ? (
-          <button className="mobileAvatar" type="button" onClick={handleLogout} disabled={authBusy} title="로그아웃">
-            {user.photoURL ? <img src={user.photoURL} alt="" /> : <span>{user.displayName?.[0] ?? "U"}</span>}
-          </button>
-        ) : (
-          <button className="mobileLogin" type="button" onClick={handleGoogleLogin} disabled={!auth || authBusy} title="Google 로그인">
-            <LogIn size={17} />
-          </button>
-        )}
+        <button type="button" onClick={() => void loadData()} disabled={loading}>
+          <RefreshCw size={16} />
+          <span>{loading ? "갱신 중" : "새로고침"}</span>
+        </button>
       </header>
 
-      <aside className="sidebar">
-        <div className="brand">
-          <CandlestickChart size={24} />
-          <div>
-            <strong>Coin Signal</strong>
-            <span>Kakao alert bot</span>
-          </div>
+      {error && <div className="errorBanner">{error}</div>}
+
+      <section className={`decisionPanel ${indicator.signal.direction}`}>
+        <div>
+          <span>현재 판단</span>
+          <strong>{indicator.signal.label}</strong>
+          <p>{indicator.signal.reasons[0] ?? "데이터를 모으는 중입니다."}</p>
         </div>
-
-        <nav className="navList" aria-label="주요 메뉴">
-          {navButtons}
-        </nav>
-      </aside>
-
-      <section className="content">
-        <div className="accountBar">
-          {user ? (
-            <div className="userMenu">
-              {user.photoURL ? <img src={user.photoURL} alt="" /> : <span className="userInitial">{user.displayName?.[0] ?? "U"}</span>}
-              <div>
-                <strong>{user.displayName ?? "Google 사용자"}</strong>
-                <span>{user.email}</span>
-              </div>
-              <button type="button" onClick={handleLogout} disabled={authBusy} title="로그아웃">
-                <LogOut size={17} />
-                <span>로그아웃</span>
-              </button>
-            </div>
-          ) : (
-            <button className="loginButton" type="button" onClick={handleGoogleLogin} disabled={!auth || authBusy} title="Google 로그인">
-              <LogIn size={17} />
-              <span>Google 로그인</span>
-            </button>
-          )}
+        <div className="decisionScore">
+          <strong>{indicator.signal.score}</strong>
+          <small>종합 점수</small>
         </div>
-
-        <header className="topbar">
-          <div>
-            <h1>{activeView === "dashboard" ? "대시보드" : activeView === "markets" ? "시총 Top 50" : "관심 코인 설정"}</h1>
-          </div>
-          <div className="signalBadge neutral">
-            <span>
-              {activeView === "dashboard"
-                ? `${buySignals.length + sellSignals.length}개`
-                : activeView === "markets"
-                  ? signals.length ? `${signals.length}개` : "로딩 중"
-                  : `${watchSymbols.length}개`}
-            </span>
-          </div>
-        </header>
-
-        {activeView === "settings" ? (
-          <section className="panel settingsPanel">
-            <div className="panelHeader">
-              <h2>관심 코인 설정</h2>
-              <span>{watchSymbols.length}개</span>
-            </div>
-            <form
-              className="coinForm"
-              onSubmit={(event) => {
-                event.preventDefault();
-                addWatchSymbol(coinInput);
-              }}
-            >
-              <input value={coinInput} onChange={(event) => setCoinInput(event.target.value)} placeholder="BTC, ETH, SOL" aria-label="관심 코인" />
-              <button type="submit" title="관심 코인 추가">
-                <Plus size={17} />
-                <span>추가</span>
-              </button>
-            </form>
-            <div className="coinChipList">
-              {watchSymbols.length === 0 ? (
-              <p className="helperText">관심 코인을 추가하면 설정에 저장됩니다.</p>
-              ) : (
-                watchSymbols.map((symbol) => (
-                  <span className="coinChip" key={symbol}>
-                    {displaySymbol(symbol)}
-                    <button type="button" onClick={() => removeWatchSymbol(symbol)} title={`${displaySymbol(symbol)} 삭제`}>
-                      <Trash2 size={14} />
-                    </button>
-                  </span>
-                ))
-              )}
-            </div>
-            <div className="suggestions">
-              <strong>Top 50에서 빠르게 추가</strong>
-              <div>
-                {signals.slice(0, 12).map((signal) => (
-                  <button type="button" key={signal.symbol} onClick={() => addWatchSymbol(signal.symbol)}>
-                    {displaySymbol(signal.symbol)}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </section>
-        ) : (
-          <>
-            {activeView === "dashboard" && (
-              <>
-                <section className="panel watchPanel">
-                  <div className="panelHeader">
-                    <h2>관심 코인</h2>
-                    <span>{watchSymbols.length}개</span>
-                  </div>
-                  <div className="watchQuickList">
-                    {watchSymbols.length === 0 ? (
-                      <p>설정에서 BTC, ETH, SOL처럼 관심 코인을 추가하세요.</p>
-                    ) : (
-                      watchSymbols.map((symbol) => (
-                        <button
-                          className={latest?.symbol === symbol ? "active" : ""}
-                          key={symbol}
-                          type="button"
-                          onClick={() => setSelectedSymbol(symbol)}
-                        >
-                          {displaySymbol(symbol)}
-                        </button>
-                      ))
-                    )}
-                  </div>
-                </section>
-
-                <section className="panel buyPanel" aria-label="매수 신호 코인">
-                  <div className="panelHeader">
-                    <h2>매수 신호</h2>
-                    <span>{buySignals.length}개</span>
-                  </div>
-                  {buySignals.length === 0 ? (
-                    <div className="emptyState">
-                      <p>{watchSymbols.length ? "관심 코인 중 현재 조건에 맞는 매수 신호가 없습니다." : "설정에서 관심 코인을 먼저 추가하세요."}</p>
-                    </div>
-                  ) : (
-                    <div className="buySignalList">
-                      {buySignals.map((signal) => (
-                        <button className="buySignalCard" key={signal.id} type="button" onClick={() => setSelectedSymbol(signal.symbol)}>
-                          <div>
-                            <span>#{signal.marketCapRank ?? "-"}</span>
-                            <strong>{displaySymbol(signal.symbol)}</strong>
-                            <small>{signal.coinName ?? signal.asset}</small>
-                          </div>
-                          <strong className="priceStack">
-                            <span>{formatNumber(signal.price, 4)} USDT</span>
-                            <small>{usdKrw ? formatKrw(signal.price * usdKrw) : "환율 대기"}</small>
-                          </strong>
-                          <span>{indicatorText(signal).rsiText}</span>
-                          <span>{indicatorText(signal).maState}</span>
-                          <span>{indicatorText(signal).fibText}</span>
-                          <span>{indicatorText(signal).volumeText}</span>
-                          <span>{indicatorText(signal).newsText}</span>
-                          <p>{buyReason(signal)}</p>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </section>
-
-                <section className="panel sellPanel" aria-label="하락 위험 코인">
-                  <div className="panelHeader">
-                    <h2>하락 위험</h2>
-                    <span>{sellSignals.length}개</span>
-                  </div>
-                  {sellSignals.length === 0 ? (
-                    <div className="emptyState">
-                      <p>{watchSymbols.length ? "관심 코인 중 현재 강한 하락 위험 신호가 없습니다." : "설정에서 관심 코인을 먼저 추가하세요."}</p>
-                    </div>
-                  ) : (
-                    <div className="buySignalList">
-                      {sellSignals.map((signal) => (
-                        <button className="buySignalCard sellSignalCard" key={signal.id} type="button" onClick={() => setSelectedSymbol(signal.symbol)}>
-                          <div>
-                            <span>#{signal.marketCapRank ?? "-"}</span>
-                            <strong>{displaySymbol(signal.symbol)}</strong>
-                            <small>{signal.coinName ?? signal.asset}</small>
-                          </div>
-                          <strong className="priceStack">
-                            <span>{formatNumber(signal.price, 4)} USDT</span>
-                            <small>{usdKrw ? formatKrw(signal.price * usdKrw) : "환율 대기"}</small>
-                          </strong>
-                          <span>{indicatorText(signal).rsiText}</span>
-                          <span>{indicatorText(signal).maState}</span>
-                          <span>{indicatorText(signal).fibText}</span>
-                          <span>{indicatorText(signal).volumeText}</span>
-                          <span>{indicatorText(signal).newsText}</span>
-                          <p>{signal.reason}</p>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </section>
-              </>
-            )}
-
-            {activeView === "markets" && (
-              <>
-                <section className="panel marketPanel">
-                  <div className="panelHeader">
-                    <h2>시총 Top 50</h2>
-                    <div className="rangeControls" aria-label="그래프 기간">
-                      {CHART_RANGES.map((range) => (
-                        <button className={chartRange === range.value ? "active" : ""} key={range.value} type="button" onClick={() => setChartRange(range.value)}>
-                          {range.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  {signals.length === 0 ? (
-                    <div className="emptyState">
-                      <p>{liveError ? `Binance 실시간 데이터 오류: ${liveError}` : "Binance 가격 데이터를 불러오는 중입니다."}</p>
-                    </div>
-                  ) : (
-                    <div className="marketList">
-                      {signals.map((signal) => (
-                      <button
-                        className={`marketRow ${watchedSignalSymbols.has(signal.symbol) && signal.direction === "buy" ? "buySignal" : ""} ${latest?.symbol === signal.symbol ? "active" : ""}`}
-                        key={signal.id}
-                        type="button"
-                        onClick={() => setSelectedSymbol(signal.symbol)}
-                      >
-                        <div className="marketAsset">
-                          <span>#{signal.marketCapRank ?? "-"}</span>
-                          <strong>{displaySymbol(signal.symbol)}</strong>
-                          <small>{signal.coinName ?? signal.asset}{watchSymbols.includes(signal.symbol) ? " · 관심" : ""}</small>
-                        </div>
-                        <strong className="marketPrice priceStack">
-                          <span>{formatNumber(signal.price, 4)} USDT</span>
-                          <small>{usdKrw ? formatKrw(signal.price * usdKrw) : "환율 대기"}</small>
-                        </strong>
-                        <span className={dayChange(signal.candles) !== null && dayChange(signal.candles)! >= 0 ? "marketChange positiveText" : "marketChange negativeText"}>
-                          {formatPercent(dayChange(signal.candles))}
-                        </span>
-                        <div className="marketIndicators">
-                          <span>{indicatorText(signal).rsiText}</span>
-                          <span>{indicatorText(signal).maState}</span>
-                          <span>{indicatorText(signal).fibText}</span>
-                          <span>{indicatorText(signal).volumeText}</span>
-                          <span>{indicatorText(signal).newsText}</span>
-                        </div>
-                        <Sparkline values={sliceByRange(signal.candles, chartRange)} times={sliceByRange(signal.candleTimes, chartRange)} />
-                      </button>
-                      ))}
-                    </div>
-                  )}
-                </section>
-              </>
-            )}
-          </>
-        )}
       </section>
 
-      <nav className="mobileNav" aria-label="모바일 주요 메뉴">
-        {navButtons}
-      </nav>
+      <section className="metricGrid">
+        <div className="metric">
+          <span>현재가</span>
+          <strong>{formatUsdt(ticker?.price ?? indicator.price)} USDT</strong>
+          <b className="krwPrice">약 {formatKrw((ticker?.price ?? indicator.price) !== null && fxRate ? (ticker?.price ?? indicator.price ?? 0) * fxRate.rate : null)}</b>
+          <small>
+            {updatedAt ? `${updatedAt.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })} 갱신` : "대기"}
+            {fxRate ? ` · 환율 ${formatNumber(fxRate.rate, 1)}원` : ""}
+          </small>
+        </div>
+        <div className="metric">
+          <span>24시간 변화</span>
+          <strong className={ticker && ticker.changePercent >= 0 ? "upText" : "downText"}>{formatPercent(ticker?.changePercent ?? null)}</strong>
+          <small>Binance 24hr ticker</small>
+        </div>
+        <div className="metric">
+          <span>RSI</span>
+          <strong>{formatNumber(indicator.rsi)}</strong>
+          <small>{indicator.rsi !== null && indicator.rsi <= 30 ? "과매도" : indicator.rsi !== null && indicator.rsi >= 70 ? "과열" : "중립"}</small>
+        </div>
+        <div className="metric">
+          <span>20주 평균선</span>
+          <strong>{formatUsdt(indicator.sma20w)} USDT</strong>
+          <small>{indicator.price && indicator.sma20w ? (indicator.price >= indicator.sma20w ? "현재가 위" : "현재가 아래") : "대기"}</small>
+        </div>
+        <div className="metric">
+          <span>시가총액 순위</span>
+          <strong>#{marketInfo?.rank ?? "-"}</strong>
+          <small>스테이블 코인 제외 · {formatUsdCompact(marketInfo?.marketCap ?? null)}</small>
+        </div>
+        <div className="metric">
+          <span>24시간 거래대금</span>
+          <strong>{formatUsdCompact(ticker?.quoteVolume ?? null)}</strong>
+          <small>Binance DOTUSDT</small>
+        </div>
+        <div className="metric">
+          <span>7일 / 30일</span>
+          <strong>
+            {formatPercent(indicator.change7d)} / {formatPercent(indicator.change30d)}
+          </strong>
+          <small>Binance 일봉 기준</small>
+        </div>
+        <div className="metric">
+          <span>추적 저장소</span>
+          <strong>{formatNumber(devItems.filter((item) => item.type === "commit").length, 0)}</strong>
+          <small>3개 GitHub 최근 커밋</small>
+        </div>
+      </section>
+
+      <div className="rangeControls" aria-label="그래프 기간">
+        {CHART_RANGES.map((item) => (
+          <button className={range === item.value ? "active" : ""} key={item.value} type="button" onClick={() => setRange(item.value)}>
+            {item.label}
+          </button>
+        ))}
+      </div>
+
+      <DotChart candles={candles} range={range} />
+
+      <section className="panel reasonPanel">
+        <div className="panelTitle">
+          <Activity size={18} />
+          <h2>판단 이유</h2>
+        </div>
+        <div className="reasonList">
+          {indicator.signal.reasons.map((reason) => (
+            <div key={reason}>{reason}</div>
+          ))}
+        </div>
+      </section>
+
+      <section className="fundamentalGrid">
+        <a className="panel fundamentalPanel" href="https://staking.polkadot.cloud/" rel="noreferrer" target="_blank">
+          <div className="panelTitle">
+            <ShieldCheck size={18} />
+            <h2>스테이킹 상태</h2>
+            <ExternalLink size={13} />
+          </div>
+          <strong>공식 현황 확인</strong>
+          <p>스테이킹 비율, 예상 보상률, 검증자 상태를 확인합니다.</p>
+          <small>노미네이션 풀은 1 DOT부터 참여 가능</small>
+        </a>
+
+        <div className="panel fundamentalPanel">
+          <div className="panelTitle">
+            <Coins size={18} />
+            <h2>공급·인플레이션</h2>
+          </div>
+          <strong>{formatNumber(marketInfo?.totalSupply ?? null, 0)} DOT</strong>
+          <p>연간 신규 발행량 1억 2천만 DOT</p>
+          <small>
+            현재 총공급 대비 약 {marketInfo?.totalSupply ? formatPercent((120_000_000 / marketInfo.totalSupply) * 100) : "-"}
+          </small>
+        </div>
+
+        <a className="panel fundamentalPanel" href="https://polkadot.js.org/apps/?rpc=wss%3A%2F%2Frpc.polkadot.io#/explorer" rel="noreferrer" target="_blank">
+          <div className="panelTitle">
+            <Network size={18} />
+            <h2>네트워크 상태</h2>
+            <ExternalLink size={13} />
+          </div>
+          <strong>{networkInfo ? (networkInfo.syncing ? "동기화 중" : "정상") : "연결 확인 중"}</strong>
+          <p>
+            확정 지연 {networkInfo ? `${formatNumber(networkInfo.bestBlock - networkInfo.finalizedBlock, 0)}블록` : "-"} · 피어 {networkInfo ? formatNumber(networkInfo.peers, 0) : "-"}
+          </p>
+          <small>런타임 v{networkInfo?.runtimeVersion ?? "-"} · 최신 #{networkInfo ? formatNumber(networkInfo.bestBlock, 0) : "-"}</small>
+        </a>
+
+        <a className="panel fundamentalPanel" href="https://polkadot.subsquare.io/referenda?ongoing=true" rel="noreferrer" target="_blank">
+          <div className="panelTitle">
+            <Landmark size={18} />
+            <h2>중요 OpenGov</h2>
+            <ExternalLink size={13} />
+          </div>
+          <strong>진행 중 안건 보기</strong>
+          <p>런타임 업그레이드, Treasury 지출, 스테이킹 변경을 확인합니다.</p>
+          <small>Subsquare Polkadot OpenGov</small>
+        </a>
+      </section>
+
+      <section className="panel ecosystemPanel">
+        <div className="ecosystemTitle">
+          <div className="panelTitle">
+            <Network size={18} />
+            <h2>Polkadot 생태계 프로젝트</h2>
+          </div>
+          <span>생태계 시가총액 순위 · DOT·스테이블 코인 제외</span>
+        </div>
+        <div className="newProjectTracker">
+          <div>
+            <strong>신규 합류 프로젝트</strong>
+            <span>최근 90일 · Firebase 스냅샷 비교</span>
+          </div>
+          {newEcosystemProjects.length ? (
+            <div className="newProjectList">
+              {newEcosystemProjects.map((project) => (
+                <a href={`https://www.coingecko.com/en/coins/${project.id}`} key={project.id} rel="noreferrer" target="_blank">
+                  {project.image && <img alt="" height="22" src={project.image} width="22" />}
+                  <span>
+                    <b>{project.name}</b>
+                    <small>{project.symbol} · {formatDate(project.firstSeen)} 감지</small>
+                  </span>
+                </a>
+              ))}
+            </div>
+          ) : (
+            <p>현재 새로 감지된 프로젝트가 없습니다. 새 프로젝트가 분류에 추가되면 여기에 표시됩니다.</p>
+          )}
+        </div>
+        <div className="ecosystemTable" role="table" aria-label="Polkadot 생태계 프로젝트 시세">
+          <div className="ecosystemHead" role="row">
+            <span>순위 / 프로젝트</span>
+            <span>설명</span>
+            <span>출시일</span>
+            <span>현재가</span>
+            <span>24시간</span>
+            <span>시가총액</span>
+            <span>공개 보유 DOT</span>
+          </div>
+          <div className="ecosystemRows">
+            {ecosystemProjects.map((project, index) => (
+              <a href={`https://www.coingecko.com/en/coins/${project.id}`} key={project.id} rel="noreferrer" role="row" target="_blank">
+                <div className="projectIdentity">
+                  <b>#{index + 1}</b>
+                  <img alt="" height="28" loading="lazy" src={project.image} width="28" />
+                  <div>
+                    <strong>{project.name}</strong>
+                    <span>{project.symbol}</span>
+                  </div>
+                </div>
+                <p className="projectDescription">{project.description}</p>
+                <div className="projectValue projectLaunch">
+                  <small>출시일</small>
+                  <strong>{project.launchDate ? formatLaunchDate(project.launchDate) : ""}</strong>
+                </div>
+                <div className="projectValue projectPrice">
+                  <small>현재가</small>
+                  <strong>{formatUsdPrice(project.price)}</strong>
+                </div>
+                <div className="projectValue projectChange">
+                  <small>24시간</small>
+                  <strong className={(project.change24h ?? 0) >= 0 ? "upText" : "downText"}>{formatPercent(project.change24h)}</strong>
+                </div>
+                <div className="projectValue projectMarketCap">
+                  <small>시가총액</small>
+                  <strong>{formatUsdCompact(project.marketCap)}</strong>
+                </div>
+                <div className="projectValue projectHoldings">
+                  <small>공개 보유 DOT</small>
+                  <strong>{project.dotHoldings !== null ? `${formatNumber(project.dotHoldings)} DOT` : ""}</strong>
+                </div>
+              </a>
+            ))}
+            {!ecosystemProjects.length && <div className="ecosystemEmpty">생태계 시세를 불러오는 중입니다.</div>}
+          </div>
+        </div>
+      </section>
+
+      <section className="detailGrid">
+        <div className="panel indicatorPanel">
+          <div className="panelTitle">
+            <TrendingUp size={18} />
+            <h2>기술 지표</h2>
+          </div>
+          <dl>
+            <div>
+              <dt>
+                <span>장기 추세선</span>
+                <small>50일 평균 / 200일 평균</small>
+              </dt>
+              <dd>
+                {formatUsdt(indicator.ema50)} / {formatUsdt(indicator.ema200)}
+                <small>{indicator.ema50 !== null && indicator.ema200 !== null ? (indicator.ema50 > indicator.ema200 ? "상승 흐름" : "하락 흐름") : "계산 중"}</small>
+              </dd>
+            </div>
+            <div>
+              <dt>
+                <span>단기 가격 힘</span>
+                <small>0보다 크면 상승 힘 우세</small>
+              </dt>
+              <dd>
+                {formatNumber(indicator.macd.histogram, 5)}
+                <small>{indicator.macd.histogram !== null ? (indicator.macd.histogram > 0 ? "상승 힘 우세" : "하락 힘 우세") : "계산 중"}</small>
+              </dd>
+            </div>
+            <div>
+              <dt>거래량 배율</dt>
+              <dd>{indicator.volumeRatio ? `${formatNumber(indicator.volumeRatio)}x` : "-"}</dd>
+            </div>
+            <div>
+              <dt>피보나치 위치</dt>
+              <dd>{indicator.fibPosition !== null ? `${formatNumber(indicator.fibPosition, 1)}%` : "-"}</dd>
+            </div>
+            <div>
+              <dt>1년 고점 / 저점</dt>
+              <dd>{formatUsdt(indicator.yearlyHigh)} / {formatUsdt(indicator.yearlyLow)}</dd>
+            </div>
+            <div>
+              <dt>유통량</dt>
+              <dd>{formatNumber(marketInfo?.circulatingSupply ?? null, 0)} DOT</dd>
+            </div>
+          </dl>
+        </div>
+
+        <div className="panel newsPanel">
+          <div className="panelTitle">
+            <Newspaper size={18} />
+            <h2>DOT 뉴스</h2>
+          </div>
+          <div className="linkList">
+            {news.map((item) => (
+              <a href={item.url} key={item.id} rel="noreferrer" target="_blank">
+                <div>
+                  <strong>{item.title}</strong>
+                  <span>
+                    {item.source} · {formatDate(item.publishedAt)} · {item.sentiment > 0 ? "긍정" : item.sentiment < 0 ? "부정" : "중립"}
+                  </span>
+                </div>
+                <ExternalLink size={14} />
+              </a>
+            ))}
+          </div>
+        </div>
+
+        <div className="panel devPanel">
+          <div className="panelTitle">
+            <Code2 size={18} />
+            <h2>DOT 개발 GitHub</h2>
+          </div>
+          <div className="repoTracker">
+            {DEV_REPOS.map((repo) => {
+              const latest = devItems.find((item) => item.repo === repo.repo);
+              const count = devItems.filter((item) => item.repo === repo.repo && item.type === "commit").length;
+              return (
+                <a href={`https://github.com/${repo.owner}/${repo.repo}`} key={repo.repo} rel="noreferrer" target="_blank">
+                  <div>
+                    <strong>{repo.label}</strong>
+                    <span>{repo.role}</span>
+                  </div>
+                  <b>{count}건 · {latest ? formatDate(latest.date) : "대기"}</b>
+                </a>
+              );
+            })}
+          </div>
+          <div className="linkList">
+            {devItems.map((item) => (
+              <a href={item.url} key={item.id} rel="noreferrer" target="_blank">
+                <div>
+                  <strong>{item.title}</strong>
+                  <span>
+                    {item.type === "release" ? "Release" : "Commit"} · {item.repo} · {formatDate(item.date)}
+                  </span>
+                </div>
+                {item.type === "release" ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
+              </a>
+            ))}
+          </div>
+        </div>
+      </section>
     </main>
   );
 }

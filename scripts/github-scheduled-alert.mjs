@@ -4,19 +4,17 @@ const require = createRequire(new URL("../functions/package.json", import.meta.u
 const { cert, getApps, initializeApp } = require("firebase-admin/app");
 const { FieldValue, getFirestore } = require("firebase-admin/firestore");
 
-const TOP_MARKET_CAP_LIMIT = 50;
 const CANDLE_LIMIT = 365;
-const BUY_THRESHOLD = 50;
-const SELL_THRESHOLD = -50;
+const BUY_THRESHOLD = 35;
+const SELL_THRESHOLD = -35;
 const PUMP_ALERT_THRESHOLD = 10;
-const MAX_ALERTS_PER_RUN = 8;
-const SCAN_CONCURRENCY = 4;
-const SITE_URL = process.env.SITE_URL || "https://coin.sanghak.kr";
+const SITE_URL = process.env.SITE_URL || "https://dot.sanghak.kr";
 const BINANCE_API_BASES = ["https://data-api.binance.vision", "https://api.binance.com", "https://api1.binance.com"];
 const EXCLUDED_ASSETS = new Set([
   "USDT",
   "USDC",
   "USDS",
+  "RLUSD",
   "DAI",
   "FDUSD",
   "TUSD",
@@ -42,122 +40,88 @@ main().catch((error) => {
 });
 
 async function main() {
-  assertEnv("FIREBASE_SERVICE_ACCOUNT_COIN_F1318");
   assertEnv("KAKAO_REST_API_KEY");
   assertEnv("KAKAO_REFRESH_TOKEN");
+
+  if (process.env.KAKAO_TEST_MESSAGE === "true") {
+    await sendKakaoTestMemo();
+    console.log("Kakao test message sent successfully.");
+    return;
+  }
+
+  assertEnv("FIREBASE_SERVICE_ACCOUNT_COIN_F1318");
 
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_COIN_F1318);
   if (!getApps().length) initializeApp({ credential: cert(serviceAccount) });
 
   const db = getFirestore();
-  const [coins, tradableSymbols, watchSymbols] = await Promise.all([
-    fetchTopMarketCapCoins(),
-    fetchBinanceTradingSymbols(),
-    fetchWatchSymbols(db),
+  await syncEcosystemProjects(db).catch((error) => console.warn(`ecosystem snapshot skipped: ${error.message}`));
+  const dot = { id: "polkadot", name: "Polkadot", symbol: "DOT", marketCapRank: null, binanceSymbol: "DOTUSDT" };
+  const [candles, ticker24h, context] = await Promise.all([
+    fetchBinanceCandles(dot.binanceSymbol, "1d", CANDLE_LIMIT),
+    fetchBinanceTicker24h(dot.binanceSymbol),
+    fetchDotContext(),
   ]);
-  const universe = coins.filter(
-    (coin) =>
-      watchSymbols.has(coin.binanceSymbol) &&
-      !EXCLUDED_ASSETS.has(coin.symbol) &&
-      tradableSymbols.has(coin.binanceSymbol),
-  );
-
-  console.log(`watchlist=${watchSymbols.size}, universe=${universe.length}`);
-  if (!universe.length) return;
-
-  const rows = await mapLimit(universe, SCAN_CONCURRENCY, async (coin) => {
-    const candles = await fetchBinanceCandles(coin.binanceSymbol, "1d", CANDLE_LIMIT);
-    return calculateSignal(coin, "1d", candles);
-  });
-  const signals = rows.sort((left, right) => (left.marketCapRank ?? 999) - (right.marketCapRank ?? 999));
+  const signals = [calculateSignal(dot, "1d", candles, ticker24h, context)];
 
   await saveSignals(db, signals);
 
-  const directional = signals
-    .filter((signal) => signal.direction !== "neutral")
-    .sort((left, right) => Math.abs(right.score) - Math.abs(left.score))
-    .slice(0, MAX_ALERTS_PER_RUN);
-  const pump = signals
-    .filter((signal) => signal.dayChangePercent !== null && signal.dayChangePercent >= PUMP_ALERT_THRESHOLD)
-    .sort((left, right) => Number(right.dayChangePercent) - Number(left.dayChangePercent))
-    .slice(0, MAX_ALERTS_PER_RUN);
-
-  for (const signal of directional) await notifyOnDirectionChange(db, signal);
-  for (const signal of pump) await notifyOnPump(db, signal);
-
   for (const signal of signals) {
+    if ((signal.dayChangePercent ?? 0) >= PUMP_ALERT_THRESHOLD) {
+      await sendKakaoMemo(signal, "pump");
+    } else if (signal.direction !== "neutral") {
+      await sendKakaoMemo(signal);
+    }
     await updateCurrentState(db, signal);
-    if ((signal.dayChangePercent ?? 0) < PUMP_ALERT_THRESHOLD) await resetPumpState(db, signal);
   }
+}
+
+async function syncEcosystemProjects(db) {
+  const url = new URL("https://api.coingecko.com/api/v3/coins/markets");
+  url.searchParams.set("vs_currency", "usd");
+  url.searchParams.set("category", "dot-ecosystem");
+  url.searchParams.set("order", "market_cap_desc");
+  url.searchParams.set("per_page", "100");
+  url.searchParams.set("page", "1");
+  url.searchParams.set("sparkline", "false");
+  const response = await fetch(url, { headers: { accept: "application/json" } });
+  if (!response.ok) throw new Error(`CoinGecko ecosystem failed: ${response.status}`);
+  const rows = (await response.json()).filter((coin) => coin.id !== "polkadot" && !isExcludedMarketCoin({ symbol: String(coin.symbol).toUpperCase(), name: coin.name }));
+  const collectionRef = db.collection("ecosystemProjects");
+  const existing = await collectionRef.get();
+  const knownIds = new Set(existing.docs.map((document) => document.id));
+  const isInitialBaseline = existing.empty;
+  const batch = db.batch();
+
+  for (const coin of rows) {
+    const isNew = !knownIds.has(coin.id);
+    batch.set(
+      collectionRef.doc(coin.id),
+      {
+        name: coin.name,
+        symbol: String(coin.symbol).toUpperCase(),
+        image: coin.image || "",
+        price: coin.current_price ?? null,
+        marketCap: coin.market_cap ?? null,
+        change24h: coin.price_change_percentage_24h ?? null,
+        active: true,
+        updatedAt: FieldValue.serverTimestamp(),
+        ...(isNew ? { firstSeen: FieldValue.serverTimestamp(), isBaseline: isInitialBaseline } : {}),
+      },
+      { merge: true },
+    );
+  }
+  await batch.commit();
+  console.log(`ecosystemProjects=${rows.length}, baseline=${isInitialBaseline}`);
 }
 
 function assertEnv(key) {
   if (!process.env[key]) throw new Error(`Missing required env: ${key}`);
 }
 
-async function fetchWatchSymbols(db) {
-  const users = await db.collection("users").get();
-  const symbols = new Set();
-
-  await Promise.all(
-    users.docs.map(async (userDoc) => {
-      const watchlist = await userDoc.ref.collection("settings").doc("watchlist").get();
-      const rows = watchlist.exists ? watchlist.data()?.symbols : null;
-      if (!Array.isArray(rows)) return;
-
-      for (const row of rows) {
-        if (typeof row !== "string") continue;
-        const symbol = normalizeBinanceSymbol(row);
-        if (symbol) symbols.add(symbol);
-      }
-    }),
-  );
-
-  for (const row of (process.env.WATCHLIST_SYMBOLS || "").split(",")) {
-    const symbol = normalizeBinanceSymbol(row);
-    if (symbol) symbols.add(symbol);
-  }
-
-  return symbols;
-}
-
-function normalizeBinanceSymbol(value) {
-  const cleaned = value.toUpperCase().replace(/[^A-Z0-9]/g, "");
-  if (!cleaned) return "";
-  return cleaned.endsWith("USDT") ? cleaned : `${cleaned}USDT`;
-}
-
-async function fetchTopMarketCapCoins() {
-  const url = new URL("https://api.coingecko.com/api/v3/coins/markets");
-  url.searchParams.set("vs_currency", "usd");
-  url.searchParams.set("order", "market_cap_desc");
-  url.searchParams.set("per_page", String(TOP_MARKET_CAP_LIMIT));
-  url.searchParams.set("page", "1");
-  url.searchParams.set("sparkline", "false");
-
-  const response = await fetch(url, { headers: { accept: "application/json" } });
-  if (!response.ok) throw new Error(`CoinGecko failed: ${response.status} ${await response.text()}`);
-
-  const rows = await response.json();
-  return rows.map((row) => {
-    const symbol = String(row.symbol).toUpperCase();
-    return {
-      id: row.id,
-      name: row.name,
-      symbol,
-      marketCapRank: row.market_cap_rank,
-      binanceSymbol: `${symbol}USDT`,
-    };
-  });
-}
-
-async function fetchBinanceTradingSymbols() {
-  const data = await fetchBinanceJson("/api/v3/exchangeInfo");
-  return new Set(
-    data.symbols
-      .filter((symbol) => symbol.status === "TRADING" && symbol.quoteAsset === "USDT" && symbol.isSpotTradingAllowed)
-      .map((symbol) => symbol.symbol),
-  );
+function isExcludedMarketCoin(coin) {
+  if (EXCLUDED_ASSETS.has(coin.symbol)) return true;
+  return /\b(stablecoin|usd|dollar)\b/i.test(coin.name);
 }
 
 async function fetchBinanceCandles(symbol, interval, limit) {
@@ -176,6 +140,14 @@ async function fetchBinanceCandles(symbol, interval, limit) {
   }));
 }
 
+async function fetchBinanceTicker24h(symbol) {
+  const row = await fetchBinanceJson(`/api/v3/ticker/24hr?symbol=${symbol}`);
+  return {
+    price: Number(row.lastPrice),
+    changePercent: Number(row.priceChangePercent),
+  };
+}
+
 async function fetchBinanceJson(path) {
   const errors = [];
   for (const base of BINANCE_API_BASES) {
@@ -186,21 +158,61 @@ async function fetchBinanceJson(path) {
   throw new Error(`Binance request failed: ${errors.join(", ")}`);
 }
 
-function calculateSignal(coin, timeframe, candles) {
+async function fetchDotContext() {
+  const repos = ["paritytech/polkadot-sdk", "polkadot-fellows/runtimes", "w3f/polkadot-spec"];
+  const [newsResult, commitResults] = await Promise.all([
+    fetch("https://min-api.cryptocompare.com/data/v2/news/?lang=EN", { headers: { accept: "application/json" } })
+      .then(async (response) => (response.ok ? response.json() : { Data: [] }))
+      .catch(() => ({ Data: [] })),
+    Promise.all(
+      repos.map((repo) =>
+        fetch(`https://api.github.com/repos/${repo}/commits?per_page=1`, { headers: { accept: "application/vnd.github+json" } })
+          .then(async (response) => (response.ok ? response.json() : []))
+          .catch(() => []),
+      ),
+    ),
+  ]);
+
+  const articles = (newsResult.Data || []).filter((item) =>
+    /polkadot|\bdot\b|parity|web3 foundation/i.test(`${item.title || ""} ${item.body || ""}`),
+  );
+  const newsScoreRaw = articles.slice(0, 8).reduce((sum, item) => sum + scoreNewsText(`${item.title || ""} ${item.body || ""}`), 0);
+  const newsScore = newsScoreRaw >= 2 ? Math.min(12, 4 + newsScoreRaw * 2) : newsScoreRaw <= -2 ? -Math.min(12, 4 + Math.abs(newsScoreRaw) * 2) : 0;
+  const now = Date.now();
+  const activeRepoCount = commitResults.filter((rows) => {
+    const date = rows[0]?.commit?.author?.date;
+    return date && now - new Date(date).getTime() <= 30 * 86_400_000;
+  }).length;
+  const devScore = activeRepoCount >= 2 ? 8 : activeRepoCount === 1 ? 3 : -4;
+
+  return { articleCount: articles.length, newsScore, activeRepoCount, devScore };
+}
+
+function scoreNewsText(text) {
+  const positive = ["adoption", "approve", "approved", "breakthrough", "growth", "launch", "milestone", "partnership", "release", "upgrade"];
+  const negative = ["attack", "delay", "exploit", "hack", "lawsuit", "outage", "reject", "risk", "scam", "vulnerability"];
+  const normalized = text.toLowerCase();
+  const positiveHits = positive.filter((word) => normalized.includes(word)).length;
+  const negativeHits = negative.filter((word) => normalized.includes(word)).length;
+  return Math.max(-3, Math.min(3, positiveHits - negativeHits));
+}
+
+function calculateSignal(coin, timeframe, candles, ticker24h, context) {
   const closes = candles.map((candle) => candle.close);
   const volumes = candles.map((candle) => candle.volume);
-  const price = closes.at(-1) ?? 0;
-  const previous = closes.at(-2) ?? price;
+  const candlePrice = closes.at(-1) ?? 0;
+  const price = Number.isFinite(ticker24h.price) ? ticker24h.price : candlePrice;
+  const previous = closes.at(-2) ?? candlePrice;
   const rsi = calculateRsi(closes);
   const ema50 = calculateEma(closes, 50);
   const ema200 = calculateEma(closes, 200);
   const volumeRatio = ratioToAverage(volumes.at(-1) ?? 0, volumes.slice(-21, -1));
-  const dayChangePercent = previous ? ((price - previous) / previous) * 100 : null;
+  const dayChangePercent = Number.isFinite(ticker24h.changePercent) ? ticker24h.changePercent : null;
   const trend = ema50 !== null && ema200 !== null ? (price > ema50 && ema50 > ema200 ? 18 : price < ema50 && ema50 < ema200 ? -18 : 0) : 0;
   const rsiScore = rsi === null ? 0 : rsi <= 30 ? 14 : rsi >= 70 ? -14 : rsi > 50 ? 6 : -6;
   const volume = volumeRatio !== null && volumeRatio >= 1.5 ? (price >= previous ? 8 : -8) : 0;
   const pump = dayChangePercent !== null && dayChangePercent >= PUMP_ALERT_THRESHOLD ? 12 : 0;
-  const score = Math.round(trend + rsiScore + volume + pump);
+  const score = Math.round(trend + rsiScore + volume + pump + context.newsScore + context.devScore);
   const direction = score >= BUY_THRESHOLD ? "buy" : score <= SELL_THRESHOLD ? "sell" : "neutral";
 
   return {
@@ -212,7 +224,14 @@ function calculateSignal(coin, timeframe, candles) {
     timeframe,
     direction,
     score,
-    reason: explainSignal(direction, { trend, rsi: rsiScore, volume, pump }),
+    reason: explainSignal(direction, {
+      trend,
+      rsi: rsiScore,
+      volume,
+      pump,
+      news: context.newsScore,
+      development: context.devScore,
+    }),
     price,
     dayChangePercent,
     rsi,
@@ -230,9 +249,10 @@ function calculateSignal(coin, timeframe, candles) {
     obvSlope: null,
     candles: closes.slice(-365),
     candleTimes: candles.map((candle) => candle.openTime).slice(-365),
-    newsScore: 0,
-    newsArticleCount: 0,
-    components: { trend, rsi: rsiScore, volume, pump },
+    newsScore: context.newsScore,
+    newsArticleCount: context.articleCount,
+    activeDevRepos: context.activeRepoCount,
+    components: { trend, rsi: rsiScore, volume, pump, news: context.newsScore, development: context.devScore },
   };
 }
 
@@ -257,58 +277,6 @@ async function saveSignals(db, signals) {
   await batch.commit();
 }
 
-async function notifyOnDirectionChange(db, signal) {
-  const stateRef = db.collection("state").doc(`${signal.symbol}_${signal.timeframe}`);
-  const state = await stateRef.get();
-  const data = state.exists ? state.data() : {};
-
-  if (
-    data.currentDirection === signal.direction &&
-    data.lastNotifiedDirection === signal.direction &&
-    Math.abs(signal.score - Number(data.lastNotifiedScore ?? 0)) < 15
-  ) {
-    return;
-  }
-
-  await sendKakaoMemo(signal);
-  await stateRef.set(
-    {
-      currentDirection: signal.direction,
-      currentScore: signal.score,
-      currentPrice: signal.price,
-      currentReason: signal.reason,
-      lastNotifiedDirection: signal.direction,
-      lastNotifiedScore: signal.score,
-      lastNotifiedPrice: signal.price,
-      lastNotifiedReason: signal.reason,
-      lastNotifiedAt: FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp(),
-    },
-    { merge: true },
-  );
-}
-
-async function notifyOnPump(db, signal) {
-  const stateRef = db.collection("state").doc(`${signal.symbol}_${signal.timeframe}`);
-  const state = await stateRef.get();
-  const data = state.exists ? state.data() : {};
-  const lastPumpPercent = Number(data.lastPumpPercent ?? 0);
-
-  if (data.pumpAlertActive && Math.abs(Number(signal.dayChangePercent ?? 0) - lastPumpPercent) < 3) return;
-
-  await sendKakaoMemo(signal, "pump");
-  await stateRef.set(
-    {
-      pumpAlertActive: true,
-      lastPumpPercent: signal.dayChangePercent,
-      lastPumpPrice: signal.price,
-      lastPumpAt: FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp(),
-    },
-    { merge: true },
-  );
-}
-
 async function updateCurrentState(db, signal) {
   await db
     .collection("state")
@@ -325,29 +293,15 @@ async function updateCurrentState(db, signal) {
     );
 }
 
-async function resetPumpState(db, signal) {
-  await db
-    .collection("state")
-    .doc(`${signal.symbol}_${signal.timeframe}`)
-    .set(
-      {
-        pumpAlertActive: false,
-        lastPumpResetPercent: signal.dayChangePercent,
-        updatedAt: FieldValue.serverTimestamp(),
-      },
-      { merge: true },
-    );
-}
-
 async function sendKakaoMemo(signal, alertType = "signal") {
   const accessToken = await refreshKakaoAccessToken();
   const asset = signal.symbol.endsWith("USDT") ? signal.symbol.slice(0, -4) : signal.symbol;
-  const label = alertType === "pump" ? "10% 이상 상승" : signal.direction === "buy" ? "매수 신호" : "하락 위험";
+  const label = alertType === "pump" ? "10% 이상 상승" : signal.direction === "buy" ? "매수 신호" : "매도 신호";
   const detail = alertType === "pump" ? `24시간 상승률: ${round(signal.dayChangePercent)}%` : signal.reason;
   const message = `[${label}] ${asset} ${signal.timeframe}
 점수: ${signal.score}
 가격: ${signal.price.toLocaleString("ko-KR", { maximumFractionDigits: 6 })} USDT
-시총 순위: #${signal.marketCapRank}
+시총 순위: ${signal.marketCapRank ? `#${signal.marketCapRank}` : "대시보드 확인"}
 ${detail}`;
 
   const response = await fetch("https://kapi.kakao.com/v2/api/talk/memo/default/send", {
@@ -366,6 +320,30 @@ ${detail}`;
   });
 
   if (!response.ok) throw new Error(`Kakao send failed: ${response.status} ${await response.text()}`);
+}
+
+async function sendKakaoTestMemo() {
+  const accessToken = await refreshKakaoAccessToken();
+  const sentAt = new Intl.DateTimeFormat("ko-KR", {
+    dateStyle: "medium",
+    timeStyle: "medium",
+    timeZone: "Asia/Seoul",
+  }).format(new Date());
+  const response = await fetch("https://kapi.kakao.com/v2/api/talk/memo/default/send", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/x-www-form-urlencoded;charset=utf-8",
+    },
+    body: new URLSearchParams({
+      template_object: JSON.stringify({
+        object_type: "text",
+        text: `[연결 테스트] DOT 알림\n카카오톡 알림 연결이 정상입니다.\n전송 시각: ${sentAt}`,
+        link: { web_url: SITE_URL, mobile_web_url: SITE_URL },
+      }),
+    }),
+  });
+  if (!response.ok) throw new Error(`Kakao test send failed: ${response.status} ${await response.text()}`);
 }
 
 async function refreshKakaoAccessToken() {
@@ -387,10 +365,18 @@ async function refreshKakaoAccessToken() {
 }
 
 function explainSignal(direction, components) {
+  const labels = {
+    trend: "장기 추세",
+    rsi: "RSI",
+    volume: "거래량",
+    pump: "24시간 급등",
+    news: "뉴스",
+    development: "개발 활동",
+  };
   const base = Object.entries(components)
     .filter(([, value]) => value !== 0)
     .sort((left, right) => Math.abs(right[1]) - Math.abs(left[1]))
-    .map(([key, value]) => `${key} ${value > 0 ? "+" : ""}${value}`)
+    .map(([key, value]) => `${labels[key] ?? key} ${value > 0 ? "+" : ""}${value}`)
     .join(", ");
   if (direction === "buy") return `매수 점수 우위: ${base}`;
   if (direction === "sell") return `하락 위험 점수 우위: ${base}`;
@@ -438,18 +424,4 @@ function average(values) {
 
 function round(value) {
   return Math.round(Number(value ?? 0) * 100) / 100;
-}
-
-async function mapLimit(items, limit, worker) {
-  const results = [];
-  let cursor = 0;
-  async function run() {
-    while (cursor < items.length) {
-      const index = cursor;
-      cursor += 1;
-      results[index] = await worker(items[index]);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
-  return results;
 }

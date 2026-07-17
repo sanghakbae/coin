@@ -9,7 +9,7 @@ initializeApp();
 const kakaoRestApiKey = defineSecret("KAKAO_REST_API_KEY");
 const kakaoClientSecret = defineSecret("KAKAO_CLIENT_SECRET");
 const kakaoRefreshToken = defineSecret("KAKAO_REFRESH_TOKEN");
-const siteUrl = defineString("SITE_URL", { default: "https://coin.sanghak.kr" });
+const siteUrl = defineString("SITE_URL", { default: "https://dot.sanghak.kr" });
 
 type Direction = "buy" | "sell" | "neutral";
 
