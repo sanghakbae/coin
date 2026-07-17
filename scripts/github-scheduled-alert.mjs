@@ -69,9 +69,9 @@ async function main() {
     fetchBinanceTicker24h(dot.binanceSymbol),
     fetchDotContext(),
     fetchMacroInfo(),
-    fetchDerivativesInfo(),
-    fetchOnchainInfo(),
-    fetchEtfInfo(),
+    fetchDerivativesInfo().catch((error) => optionalDataUnavailable("derivatives", error)),
+    fetchOnchainInfo().catch((error) => optionalDataUnavailable("onchain", error)),
+    fetchEtfInfo().catch((error) => optionalDataUnavailable("etf", error)),
   ]);
   const signals = [calculateSignal(dot, "1d", candles, ticker24h, context, macro, derivatives, onchain, etf)];
 
@@ -84,13 +84,13 @@ async function main() {
       riskLevel: signal.riskLevel,
       components: signal.components,
       developmentIndex: signal.developmentIndex,
-      networkHealthy: signal.onchain.networkHealthy,
+      networkHealthy: signal.onchain?.networkHealthy ?? null,
       derivatives: signal.derivatives,
       onchain: signal.onchain,
       etf: {
-        aum: signal.etf.aum,
-        sharesChange5d: signal.etf.sharesChange5d,
-        premiumDiscount: signal.etf.premiumDiscount,
+        aum: signal.etf?.aum ?? null,
+        sharesChange5d: signal.etf?.sharesChange5d ?? null,
+        premiumDiscount: signal.etf?.premiumDiscount ?? null,
       },
     }, null, 2));
     return;
@@ -114,6 +114,11 @@ async function main() {
     }
     await updateCurrentState(db, signal);
   }
+}
+
+function optionalDataUnavailable(name, error) {
+  console.warn(`${name} unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  return null;
 }
 
 async function readPreviousState(db, signal) {
@@ -474,10 +479,10 @@ function calculateSignal(coin, timeframe, candles, ticker24h, context, macro, de
   const dayChangePercent = Number.isFinite(ticker24h.changePercent) ? ticker24h.changePercent : null;
   const change7d = calculatePeriodChange(closes, 7);
   const trendState = ema50 !== null && ema200 !== null && price > ema50 && ema50 > ema200 ? 1 : ema50 !== null && ema200 !== null && price < ema50 && ema50 < ema200 ? -1 : 0;
-  const btcRegime = macro.btcEma200 ? (macro.btcPrice >= macro.btcEma200 ? 1 : -1) : 0;
+  const btcRegime = macro?.btcEma200 ? (macro.btcPrice >= macro.btcEma200 ? 1 : -1) : 0;
   const result = evaluateDotSignal({
     above20w: sma20w === null ? null : price >= sma20w,
-    activeValidators: onchain.activeValidators,
+    activeValidators: onchain?.activeValidators ?? null,
     adx,
     atrPercent: atr && price ? (atr / price) * 100 : null,
     bollingerPosition: bollinger.position,
@@ -485,20 +490,20 @@ function calculateSignal(coin, timeframe, candles, ticker24h, context, macro, de
     change24h: dayChangePercent,
     change7d,
     developmentIndex: context.developmentIndex,
-    dotBtcChange7d: macro.dotBtcChange7d,
-    etfDayChange: etf.dayChange,
-    etfPremiumDiscount: etf.premiumDiscount,
-    etfSharesChange5d: etf.sharesChange5d,
-    etfVolumeRatio: etf.volumeRatio,
-    fundingRatePercent: derivatives.fundingRatePercent,
-    longShortRatio: derivatives.longShortRatio,
+    dotBtcChange7d: macro?.dotBtcChange7d ?? null,
+    etfDayChange: etf?.dayChange ?? null,
+    etfPremiumDiscount: etf?.premiumDiscount ?? null,
+    etfSharesChange5d: etf?.sharesChange5d ?? null,
+    etfVolumeRatio: etf?.volumeRatio ?? null,
+    fundingRatePercent: derivatives?.fundingRatePercent ?? null,
+    longShortRatio: derivatives?.longShortRatio ?? null,
     macdHistogram: macd.histogram,
-    networkHealthy: onchain.networkHealthy,
+    networkHealthy: onchain?.networkHealthy ?? null,
     newsBalance: context.newsBalance,
-    openInterestChange24h: derivatives.openInterestChange24h,
+    openInterestChange24h: derivatives?.openInterestChange24h ?? null,
     priceUp: price >= previous,
     rsi,
-    stakedPercent: onchain.stakedPercent,
+    stakedPercent: onchain?.stakedPercent ?? null,
     trendState,
     volumeRatio,
   });
