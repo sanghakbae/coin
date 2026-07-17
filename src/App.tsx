@@ -85,9 +85,6 @@ interface EcosystemProject {
   price: number | null;
   marketCap: number | null;
   change24h: number | null;
-  launchDate: string | null;
-  description: string;
-  dotHoldings: number | null;
 }
 
 interface NewEcosystemProject extends EcosystemProject {
@@ -133,10 +130,6 @@ function isStableCoin(coin: { symbol: string; name: string }) {
 
 function formatDate(value: number | string) {
   return new Intl.DateTimeFormat("ko-KR", { month: "short", day: "numeric" }).format(new Date(value));
-}
-
-function formatLaunchDate(value: string) {
-  return new Intl.DateTimeFormat("ko-KR", { year: "numeric", month: "short", day: "numeric" }).format(new Date(value));
 }
 
 function average(values: number[]) {
@@ -599,7 +592,7 @@ async function fetchEcosystemProjects(): Promise<EcosystemProject[]> {
     market_cap: number | null;
     price_change_percentage_24h: number | null;
   }>;
-  const projects: EcosystemProject[] = rows
+  return rows
     .filter((coin) => coin.id !== "polkadot" && !isStableCoin(coin))
     .slice(0, 20)
     .map((coin) => ({
@@ -610,54 +603,7 @@ async function fetchEcosystemProjects(): Promise<EcosystemProject[]> {
       price: coin.current_price,
       marketCap: coin.market_cap,
       change24h: coin.price_change_percentage_24h,
-      launchDate: null,
-      description: "",
-      dotHoldings: null,
     }));
-
-  const cacheKey = "dot-ecosystem-details-v2-ko";
-  const cached = JSON.parse(window.localStorage.getItem(cacheKey) ?? "{}") as Record<
-    string,
-    { launchDate: string | null; description: string; cachedAt: number }
-  >;
-  const cacheMaxAge = 24 * 60 * 60_000;
-
-  await Promise.all(
-    projects.map(async (project) => {
-        const saved = cached[project.id];
-        if (saved && Date.now() - saved.cachedAt < cacheMaxAge) {
-          project.launchDate = saved.launchDate;
-          project.description = saved.description;
-          return;
-        }
-
-        try {
-          const detailUrl = new URL(`https://api.coingecko.com/api/v3/coins/${project.id}`);
-          detailUrl.searchParams.set("localization", "true");
-          detailUrl.searchParams.set("tickers", "false");
-          detailUrl.searchParams.set("market_data", "false");
-          detailUrl.searchParams.set("community_data", "false");
-          detailUrl.searchParams.set("developer_data", "false");
-          detailUrl.searchParams.set("sparkline", "false");
-          const detailResponse = await fetch(detailUrl, {
-            headers: { accept: "application/json" },
-            signal: AbortSignal.timeout(5_000),
-          });
-          if (!detailResponse.ok) return;
-          const detail = (await detailResponse.json()) as { genesis_date?: string | null; description?: { ko?: string } };
-          const parsed = new DOMParser().parseFromString(detail.description?.ko ?? "", "text/html").body.textContent ?? "";
-          const description = parsed.replace(/\s+/g, " ").trim();
-          project.launchDate = detail.genesis_date ?? null;
-          project.description = description;
-          cached[project.id] = { launchDate: project.launchDate, description, cachedAt: Date.now() };
-        } catch {
-          // Individual project details may be unavailable due to public API rate limits.
-        }
-      }),
-  );
-
-  window.localStorage.setItem(cacheKey, JSON.stringify(cached));
-  return projects;
 }
 
 async function fetchNewEcosystemProjects(currentProjects: EcosystemProject[]): Promise<NewEcosystemProject[]> {
@@ -679,7 +625,6 @@ async function fetchNewEcosystemProjects(currentProjects: EcosystemProject[]): P
               firstSeen?: { toMillis?: () => number };
               isBaseline?: boolean;
             };
-            const current = currentProjects.find((project) => project.id === document.id);
             return {
               id: document.id,
               name: data.name ?? document.id,
@@ -688,9 +633,6 @@ async function fetchNewEcosystemProjects(currentProjects: EcosystemProject[]): P
               price: data.price ?? null,
               marketCap: data.marketCap ?? null,
               change24h: data.change24h ?? null,
-              launchDate: current?.launchDate ?? null,
-              description: current?.description ?? "",
-              dotHoldings: current?.dotHoldings ?? null,
               firstSeen: data.firstSeen?.toMillis?.() ?? 0,
               isBaseline: data.isBaseline ?? true,
             };
@@ -1122,12 +1064,9 @@ export default function App() {
         <div className="ecosystemTable" role="table" aria-label="Polkadot 생태계 프로젝트 시세">
           <div className="ecosystemHead" role="row">
             <span>순위 / 프로젝트</span>
-            <span>설명</span>
-            <span>출시일</span>
             <span>현재가</span>
             <span>24시간</span>
             <span>시가총액</span>
-            <span>공개 보유 DOT</span>
           </div>
           <div className="ecosystemRows">
             {ecosystemProjects.map((project, index) => (
@@ -1140,11 +1079,6 @@ export default function App() {
                     <span>{project.symbol}</span>
                   </div>
                 </div>
-                <p className="projectDescription">{project.description}</p>
-                <div className="projectValue projectLaunch">
-                  <small>출시일</small>
-                  <strong>{project.launchDate ? formatLaunchDate(project.launchDate) : ""}</strong>
-                </div>
                 <div className="projectValue projectPrice">
                   <small>현재가</small>
                   <strong>{formatUsdPrice(project.price)}</strong>
@@ -1156,10 +1090,6 @@ export default function App() {
                 <div className="projectValue projectMarketCap">
                   <small>시가총액</small>
                   <strong>{formatUsdCompact(project.marketCap)}</strong>
-                </div>
-                <div className="projectValue projectHoldings">
-                  <small>공개 보유 DOT</small>
-                  <strong>{project.dotHoldings !== null ? `${formatNumber(project.dotHoldings)} DOT` : ""}</strong>
                 </div>
               </a>
             ))}

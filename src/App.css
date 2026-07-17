@@ -663,14 +663,7 @@ a.fundamentalPanel:hover {
 .ecosystemHead,
 .ecosystemRows a {
   display: grid;
-  grid-template-columns:
-    minmax(180px, 1.15fr)
-    minmax(240px, 1.7fr)
-    minmax(110px, 0.7fr)
-    minmax(90px, 0.6fr)
-    minmax(75px, 0.45fr)
-    minmax(110px, 0.7fr)
-    minmax(110px, 0.7fr);
+  grid-template-columns: minmax(230px, 1.4fr) minmax(110px, 0.65fr) minmax(90px, 0.5fr) minmax(120px, 0.75fr);
   align-items: center;
   gap: 12px;
   min-width: 0;
@@ -730,18 +723,6 @@ a.fundamentalPanel:hover {
   color: #72849a;
   font-size: 9px;
   font-weight: 900;
-}
-
-.projectDescription {
-  display: -webkit-box;
-  overflow: hidden;
-  margin: 0;
-  color: #8595a9;
-  font-size: 10px;
-  font-weight: 650;
-  line-height: 1.4;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
 }
 
 .projectValue small {
@@ -1068,10 +1049,7 @@ dd small {
   }
 
   .ecosystemRows a {
-    grid-template-areas:
-      "identity price marketcap"
-      "description description description"
-      "launch holdings holdings";
+    grid-template-areas: "identity price marketcap";
     grid-template-columns: minmax(0, 1fr) auto auto;
     gap: 9px;
     padding: 10px 2px;
@@ -1088,24 +1066,6 @@ dd small {
     height: 26px;
   }
 
-  .projectDescription {
-    grid-area: description;
-    margin-left: 51px;
-    -webkit-line-clamp: 2;
-  }
-
-  .projectDescription:empty,
-  .projectLaunch:has(strong:empty),
-  .projectHoldings:has(strong:empty) {
-    display: none;
-  }
-
-  .projectLaunch {
-    grid-area: launch;
-    margin-left: 51px;
-    text-align: left;
-  }
-
   .projectPrice {
     grid-area: price;
   }
@@ -1116,10 +1076,6 @@ dd small {
 
   .projectMarketCap {
     grid-area: marketcap;
-  }
-
-  .projectHoldings {
-    grid-area: holdings;
   }
 
   .projectValue {
