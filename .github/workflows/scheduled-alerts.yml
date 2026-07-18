@@ -1,4 +1,4 @@
-name: Scheduled DOT Alerts
+name: Scheduled Coin Alerts
 
 on:
   schedule:
@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: scheduled-dot-alerts
+  group: scheduled-coin-alerts
   cancel-in-progress: false
 
 jobs:

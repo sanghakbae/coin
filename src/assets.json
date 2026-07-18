@@ -1,0 +1,87 @@
+{
+  "DOT": {
+    "coinId": "polkadot",
+    "label": "폴카닷",
+    "symbol": "DOT",
+    "binanceSymbol": "DOTUSDT",
+    "btcSymbol": "DOTBTC",
+    "newsKeywords": ["polkadot", "dot", "parity", "web3 foundation"],
+    "networkAdapter": "polkadot",
+    "officialNewsUrl": "https://polkadot.com/blog",
+    "ecosystemCategory": "dot-ecosystem",
+    "ecosystemTitle": "생태계 프로젝트",
+    "repos": [
+      { "owner": "paritytech", "repo": "polkadot-sdk", "label": "Polkadot SDK", "role": "코어 SDK", "branch": "master" },
+      { "owner": "polkadot-fellows", "repo": "runtimes", "label": "Polkadot Runtimes", "role": "실제 네트워크 런타임", "branch": "main" },
+      { "owner": "w3f", "repo": "polkadot-spec", "label": "Polkadot Spec", "role": "프로토콜 명세", "branch": "master" }
+    ]
+  },
+  "XRP": {
+    "coinId": "ripple",
+    "label": "리플",
+    "symbol": "XRP",
+    "binanceSymbol": "XRPUSDT",
+    "btcSymbol": "XRPBTC",
+    "newsKeywords": ["xrp", "ripple", "xrp ledger", "xrpl"],
+    "networkAdapter": "xrpl",
+    "officialNewsUrl": "https://xrpl.org/blog/",
+    "ecosystemCategory": "xrp-ledger-ecosystem",
+    "ecosystemTitle": "XRPL 생태계 프로젝트",
+    "repos": [
+      { "owner": "XRPLF", "repo": "rippled", "label": "XRPL Core", "role": "원장 코어 서버", "branch": "develop" },
+      { "owner": "XRPLF", "repo": "xrpl.js", "label": "xrpl.js", "role": "JavaScript SDK", "branch": "main" },
+      { "owner": "XRPLF", "repo": "xrpl-dev-portal", "label": "XRPL Docs", "role": "개발 문서", "branch": "master" }
+    ]
+  },
+  "LINK": {
+    "coinId": "chainlink",
+    "label": "체인링크",
+    "symbol": "LINK",
+    "binanceSymbol": "LINKUSDT",
+    "btcSymbol": "LINKBTC",
+    "newsKeywords": ["chainlink", "link", "ccip", "oracle network"],
+    "networkAdapter": "none",
+    "officialNewsUrl": "https://chain.link/resources",
+    "ecosystemCategory": "oracle",
+    "ecosystemTitle": "오라클 프로젝트",
+    "repos": [
+      { "owner": "smartcontractkit", "repo": "chainlink", "label": "Chainlink Core", "role": "오라클 노드 코어", "branch": "develop" },
+      { "owner": "smartcontractkit", "repo": "chainlink-ccip", "label": "Chainlink CCIP", "role": "크로스체인 프로토콜", "branch": "main" },
+      { "owner": "smartcontractkit", "repo": "documentation", "label": "Chainlink Docs", "role": "개발 문서", "branch": "main" }
+    ]
+  },
+  "AVAX": {
+    "coinId": "avalanche-2",
+    "label": "아발란체",
+    "symbol": "AVAX",
+    "binanceSymbol": "AVAXUSDT",
+    "btcSymbol": "AVAXBTC",
+    "newsKeywords": ["avalanche", "avax", "ava labs", "avalanche9000"],
+    "networkAdapter": "avalanche",
+    "officialNewsUrl": "https://www.avax.network/blog",
+    "ecosystemCategory": "avalanche-ecosystem",
+    "ecosystemTitle": "생태계 프로젝트",
+    "repos": [
+      { "owner": "ava-labs", "repo": "avalanchego", "label": "AvalancheGo", "role": "네트워크 코어", "branch": "master" },
+      { "owner": "ava-labs", "repo": "subnet-evm", "label": "Subnet EVM", "role": "커스텀 EVM", "branch": "master" },
+      { "owner": "ava-labs", "repo": "coreth", "label": "Coreth", "role": "C-Chain 엔진", "branch": "master" }
+    ]
+  },
+  "ATOM": {
+    "coinId": "cosmos",
+    "label": "코스모스",
+    "symbol": "ATOM",
+    "binanceSymbol": "ATOMUSDT",
+    "btcSymbol": "ATOMBTC",
+    "newsKeywords": ["cosmos", "atom", "interchain", "ibc", "cosmos hub"],
+    "networkAdapter": "none",
+    "officialNewsUrl": "https://cosmos.network/blog",
+    "ecosystemCategory": "cosmos-ecosystem",
+    "ecosystemTitle": "생태계 프로젝트",
+    "repos": [
+      { "owner": "cosmos", "repo": "cosmos-sdk", "label": "Cosmos SDK", "role": "앱체인 SDK", "branch": "main" },
+      { "owner": "cosmos", "repo": "gaia", "label": "Cosmos Hub", "role": "허브 체인", "branch": "main" },
+      { "owner": "cosmos", "repo": "ibc-go", "label": "IBC Go", "role": "체인 간 통신", "branch": "main" }
+    ]
+  }
+}

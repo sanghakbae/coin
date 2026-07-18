@@ -5,6 +5,7 @@ const require = createRequire(new URL("../functions/package.json", import.meta.u
 const { cert, getApps, initializeApp } = require("firebase-admin/app");
 const { FieldValue, getFirestore } = require("firebase-admin/firestore");
 const xxhash = require("xxhash-wasm");
+const ASSETS_BY_KEY = require("../src/assets.json");
 
 const CANDLE_LIMIT = 365;
 const PUMP_ALERT_THRESHOLD = 10;
@@ -36,6 +37,7 @@ const EXCLUDED_ASSETS = new Set([
   "STETH",
   "WSTETH",
 ]);
+const ASSETS = Object.values(ASSETS_BY_KEY);
 
 main().catch((error) => {
   console.error(error);
@@ -63,21 +65,15 @@ async function main() {
     db = getFirestore();
     await syncEcosystemProjects(db).catch((error) => console.warn(`ecosystem snapshot skipped: ${error.message}`));
   }
-  const dot = { id: "polkadot", name: "Polkadot", symbol: "DOT", marketCapRank: null, binanceSymbol: "DOTUSDT" };
-  const [candles, ticker24h, context, macro, derivatives, onchain, etf] = await Promise.all([
-    fetchBinanceCandles(dot.binanceSymbol, "1d", CANDLE_LIMIT),
-    fetchBinanceTicker24h(dot.binanceSymbol),
-    fetchDotContext(),
-    fetchMacroInfo(),
-    fetchDerivativesInfo().catch((error) => optionalDataUnavailable("derivatives", error)),
-    fetchOnchainInfo().catch((error) => optionalDataUnavailable("onchain", error)),
-    fetchEtfInfo().catch((error) => optionalDataUnavailable("etf", error)),
-  ]);
-  const signals = [calculateSignal(dot, "1d", candles, ticker24h, context, macro, derivatives, onchain, etf)];
+  const watchlist = parseWatchlist();
+  const assets = ASSETS.filter((asset) => watchlist.has(asset.binanceSymbol));
+  if (!assets.length) throw new Error(`No configured assets match WATCHLIST_SYMBOLS: ${[...watchlist].join(", ")}`);
+  const signals = await Promise.all(assets.map((asset) => calculateAssetSignal(asset)));
 
   if (dryRun) {
-    const signal = signals[0];
-    console.log(JSON.stringify({
+    console.log(JSON.stringify(signals.map((signal) => ({
+      asset: signal.asset,
+      symbol: signal.symbol,
       direction: signal.direction,
       score: signal.score,
       confidence: signal.confidence,
@@ -87,12 +83,12 @@ async function main() {
       networkHealthy: signal.onchain?.networkHealthy ?? null,
       derivatives: signal.derivatives,
       onchain: signal.onchain,
-      etf: {
-        aum: signal.etf?.aum ?? null,
-        sharesChange5d: signal.etf?.sharesChange5d ?? null,
-        premiumDiscount: signal.etf?.premiumDiscount ?? null,
-      },
-    }, null, 2));
+      etf: signal.etf ? {
+        aum: signal.etf.aum ?? null,
+        sharesChange5d: signal.etf.sharesChange5d ?? null,
+        premiumDiscount: signal.etf.premiumDiscount ?? null,
+      } : null,
+    })), null, 2));
     return;
   }
 
@@ -121,6 +117,27 @@ function optionalDataUnavailable(name, error) {
   return null;
 }
 
+function parseWatchlist() {
+  const raw = process.env.WATCHLIST_SYMBOLS?.trim();
+  const symbols = raw
+    ? raw.split(",").map((symbol) => symbol.trim().toUpperCase()).filter(Boolean)
+    : ASSETS.map((asset) => asset.binanceSymbol);
+  return new Set(symbols);
+}
+
+async function calculateAssetSignal(asset) {
+  const [candles, ticker24h, context, macro, derivatives, onchain, etf] = await Promise.all([
+    fetchBinanceCandles(asset.binanceSymbol, "1d", CANDLE_LIMIT),
+    fetchBinanceTicker24h(asset.binanceSymbol),
+    fetchAssetContext(asset),
+    fetchMacroInfo(asset.btcSymbol),
+    fetchDerivativesInfo(asset.binanceSymbol).catch((error) => optionalDataUnavailable(`${asset.symbol} derivatives`, error)),
+    asset.networkAdapter === "polkadot" ? fetchOnchainInfo().catch((error) => optionalDataUnavailable("onchain", error)) : Promise.resolve(null),
+    asset.networkAdapter === "polkadot" ? fetchEtfInfo().catch((error) => optionalDataUnavailable("etf", error)) : Promise.resolve(null),
+  ]);
+  return calculateSignal(asset, "1d", candles, ticker24h, context, macro, derivatives, onchain, etf);
+}
+
 async function readPreviousState(db, signal) {
   const snapshot = await db.collection("state").doc(`${signal.symbol}_${signal.timeframe}`).get();
   if (!snapshot.exists) return null;
@@ -136,42 +153,49 @@ async function readPreviousState(db, signal) {
 }
 
 async function syncEcosystemProjects(db) {
-  const url = new URL("https://api.coingecko.com/api/v3/coins/markets");
-  url.searchParams.set("vs_currency", "usd");
-  url.searchParams.set("category", "dot-ecosystem");
-  url.searchParams.set("order", "market_cap_desc");
-  url.searchParams.set("per_page", "100");
-  url.searchParams.set("page", "1");
-  url.searchParams.set("sparkline", "false");
-  const response = await fetch(url, { headers: { accept: "application/json" } });
-  if (!response.ok) throw new Error(`CoinGecko ecosystem failed: ${response.status}`);
-  const rows = (await response.json()).filter((coin) => coin.id !== "polkadot" && !isExcludedMarketCoin({ symbol: String(coin.symbol).toUpperCase(), name: coin.name }));
-  const collectionRef = db.collection("ecosystemProjects");
-  const existing = await collectionRef.get();
-  const knownIds = new Set(existing.docs.map((document) => document.id));
-  const isInitialBaseline = existing.empty;
-  const batch = db.batch();
-
-  for (const coin of rows) {
-    const isNew = !knownIds.has(coin.id);
-    batch.set(
-      collectionRef.doc(coin.id),
-      {
-        name: coin.name,
-        symbol: String(coin.symbol).toUpperCase(),
-        image: coin.image || "",
-        price: coin.current_price ?? null,
-        marketCap: coin.market_cap ?? null,
-        change24h: coin.price_change_percentage_24h ?? null,
-        active: true,
-        updatedAt: FieldValue.serverTimestamp(),
-        ...(isNew ? { firstSeen: FieldValue.serverTimestamp(), isBaseline: isInitialBaseline } : {}),
-      },
-      { merge: true },
+  const assets = ASSETS.filter((asset) => asset.ecosystemCategory);
+  for (const asset of assets) {
+    const url = new URL("https://api.coingecko.com/api/v3/coins/markets");
+    url.searchParams.set("vs_currency", "usd");
+    url.searchParams.set("category", asset.ecosystemCategory);
+    url.searchParams.set("order", "market_cap_desc");
+    url.searchParams.set("per_page", "100");
+    url.searchParams.set("page", "1");
+    url.searchParams.set("sparkline", "false");
+    const response = await fetch(url, { headers: { accept: "application/json" } });
+    if (!response.ok) throw new Error(`CoinGecko ${asset.symbol} ecosystem failed: ${response.status}`);
+    const rows = (await response.json()).filter((coin) =>
+      coin.id !== asset.coinId && !isExcludedMarketCoin({ symbol: String(coin.symbol).toUpperCase(), name: coin.name }),
     );
+    const collectionRef = db.collection("ecosystemProjects").doc(asset.symbol).collection("projects");
+    const existing = await collectionRef.get();
+    const knownIds = new Set(existing.docs.map((document) => document.id));
+    const isInitialBaseline = existing.empty;
+    const batch = db.batch();
+
+    for (const coin of rows) {
+      const isNew = !knownIds.has(coin.id);
+      batch.set(
+        collectionRef.doc(coin.id),
+        {
+          assetSymbol: asset.symbol,
+          category: asset.ecosystemCategory,
+          name: coin.name,
+          symbol: String(coin.symbol).toUpperCase(),
+          image: coin.image || "",
+          price: coin.current_price ?? null,
+          marketCap: coin.market_cap ?? null,
+          change24h: coin.price_change_percentage_24h ?? null,
+          active: true,
+          updatedAt: FieldValue.serverTimestamp(),
+          ...(isNew ? { firstSeen: FieldValue.serverTimestamp(), isBaseline: isInitialBaseline } : {}),
+        },
+        { merge: true },
+      );
+    }
+    await batch.commit();
+    console.log(`${asset.symbol} ecosystemProjects=${rows.length}, baseline=${isInitialBaseline}`);
   }
-  await batch.commit();
-  console.log(`ecosystemProjects=${rows.length}, baseline=${isInitialBaseline}`);
 }
 
 function assertEnv(key) {
@@ -221,19 +245,19 @@ async function fetchBinanceJson(path) {
   throw new Error(`Binance request failed: ${errors.join(", ")}`);
 }
 
-async function fetchMacroInfo() {
-  const [btcCandles, btcTicker, dotBtcCandles] = await Promise.all([
+async function fetchMacroInfo(assetBtcSymbol) {
+  const [btcCandles, btcTicker, assetBtcCandles] = await Promise.all([
     fetchBinanceCandles("BTCUSDT", "1d", 365),
     fetchBinanceTicker24h("BTCUSDT"),
-    fetchBinanceCandles("DOTBTC", "1d", 30),
+    fetchBinanceCandles(assetBtcSymbol, "1d", 30),
   ]);
   const btcCloses = btcCandles.map((candle) => candle.close);
-  const dotBtcCloses = dotBtcCandles.map((candle) => candle.close);
+  const assetBtcCloses = assetBtcCandles.map((candle) => candle.close);
   return {
     btcChange24h: btcTicker.changePercent,
     btcEma200: calculateEma(btcCloses, 200),
     btcPrice: btcTicker.price,
-    dotBtcChange7d: calculatePeriodChange(dotBtcCloses, 7),
+    dotBtcChange7d: calculatePeriodChange(assetBtcCloses, 7),
   };
 }
 
@@ -261,12 +285,12 @@ async function readJsonResponse(response, source) {
   }
 }
 
-async function fetchDerivativesInfo() {
+async function fetchDerivativesInfo(symbol) {
   const [premium, openInterest, history, ratios] = await Promise.all([
-    fetchFuturesJson("/fapi/v1/premiumIndex?symbol=DOTUSDT"),
-    fetchFuturesJson("/fapi/v1/openInterest?symbol=DOTUSDT"),
-    fetchFuturesJson("/futures/data/openInterestHist?symbol=DOTUSDT&period=1d&limit=2"),
-    fetchFuturesJson("/futures/data/globalLongShortAccountRatio?symbol=DOTUSDT&period=1d&limit=1"),
+    fetchFuturesJson(`/fapi/v1/premiumIndex?symbol=${symbol}`),
+    fetchFuturesJson(`/fapi/v1/openInterest?symbol=${symbol}`),
+    fetchFuturesJson(`/futures/data/openInterestHist?symbol=${symbol}&period=1d&limit=2`),
+    fetchFuturesJson(`/futures/data/globalLongShortAccountRatio?symbol=${symbol}&period=1d&limit=1`),
   ]);
   const currentHistory = history.at(-1);
   const previousHistory = history[0];
@@ -396,8 +420,8 @@ async function storageMapKeyU32(prefix, value) {
   return `${prefix}${hash}${encoded}`;
 }
 
-async function fetchDotContext() {
-  const repos = ["paritytech/polkadot-sdk", "polkadot-fellows/runtimes", "w3f/polkadot-spec"];
+async function fetchAssetContext(asset) {
+  const repos = asset.repos;
   const githubHeaders = {
     accept: "application/vnd.github+json",
     ...(process.env.GITHUB_TOKEN ? { authorization: `Bearer ${process.env.GITHUB_TOKEN}` } : {}),
@@ -406,22 +430,24 @@ async function fetchDotContext() {
     fetch("https://min-api.cryptocompare.com/data/v2/news/?lang=EN", { headers: { accept: "application/json" } })
       .then(async (response) => (response.ok ? response.json() : { Data: [] }))
       .catch(() => ({ Data: [] })),
-    Promise.all(repos.map(async (repo) => {
-      const [commits, releases] = await Promise.all([
-        fetch(`https://api.github.com/repos/${repo}/commits?per_page=4`, { headers: githubHeaders })
+    Promise.all(repos.map(async (repoInfo) => {
+      const repo = `${repoInfo.owner}/${repoInfo.repo}`;
+      const branchParam = repoInfo.branch ? `&sha=${encodeURIComponent(repoInfo.branch)}` : "";
+      const [apiCommits, releases] = await Promise.all([
+        fetch(`https://api.github.com/repos/${repo}/commits?per_page=4${branchParam}`, { headers: githubHeaders })
           .then(async (response) => (response.ok ? response.json() : []))
           .catch(() => []),
         fetch(`https://api.github.com/repos/${repo}/releases?per_page=1`, { headers: githubHeaders })
           .then(async (response) => (response.ok ? response.json() : []))
           .catch(() => []),
       ]);
-      return { repo, commits, releases };
+      const commits = apiCommits.length ? apiCommits : await fetchGitHubAtomCommits(repoInfo);
+      return { repo: repoInfo.repo, commits, releases };
     })),
   ]);
 
-  const articles = (newsResult.Data || []).filter((item) =>
-    /polkadot|\bdot\b|parity|web3 foundation/i.test(`${item.title || ""} ${item.body || ""}`),
-  );
+  const newsPattern = new RegExp(asset.newsKeywords.map(escapeRegExp).join("|"), "i");
+  const articles = (newsResult.Data || []).filter((item) => newsPattern.test(`${item.title || ""} ${item.body || ""}`));
   const newsScoreRaw = articles.slice(0, 8).reduce((sum, item) => sum + scoreNewsText(`${item.title || ""} ${item.body || ""}`), 0);
   const newsScore = newsScoreRaw >= 2 ? Math.min(12, 4 + newsScoreRaw * 2) : newsScoreRaw <= -2 ? -Math.min(12, 4 + Math.abs(newsScoreRaw) * 2) : 0;
   const activeRepoCount = repoResults.filter(({ commits }) => {
@@ -432,6 +458,53 @@ async function fetchDotContext() {
   }).length;
   const developmentIndex = calculateDevelopmentIndex(repoResults, repos.length);
   return { articleCount: articles.length, newsBalance: newsScoreRaw, newsScore, activeRepoCount, developmentIndex };
+}
+
+async function fetchGitHubAtomCommits(repoInfo) {
+  const branchCandidates = [...new Set([repoInfo.branch, "main", "master", "develop"].filter(Boolean))];
+  for (const branch of branchCandidates) {
+    try {
+      const response = await fetch(`https://github.com/${repoInfo.owner}/${repoInfo.repo}/commits/${branch}.atom`, {
+        headers: { accept: "application/atom+xml, application/xml, text/xml" },
+      });
+      if (!response.ok) continue;
+      const xml = await response.text();
+      const entries = [...xml.matchAll(/<entry>([\s\S]*?)<\/entry>/g)].slice(0, 4);
+      const commits = entries.map(([, entry]) => {
+        const title = decodeXml(matchXml(entry, "title") || "최근 커밋").replace(/\s+/g, " ").trim();
+        const updated = matchXml(entry, "updated") || new Date().toISOString();
+        const href = entry.match(/<link[^>]*rel="alternate"[^>]*href="([^"]+)"/)?.[1] || `https://github.com/${repoInfo.owner}/${repoInfo.repo}/commits/${branch}`;
+        return {
+          html_url: decodeXml(href),
+          commit: {
+            message: title,
+            author: { date: updated },
+          },
+        };
+      });
+      if (commits.length) return commits;
+    } catch {
+      // Try the next likely branch.
+    }
+  }
+  return [];
+}
+
+function matchXml(xml, tag) {
+  return xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`))?.[1]?.trim() ?? "";
+}
+
+function decodeXml(value) {
+  return value
+    .replaceAll("&quot;", "\"")
+    .replaceAll("&amp;", "&")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&#39;", "'");
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function calculateDevelopmentIndex(repoResults, repoCount) {
@@ -481,6 +554,7 @@ function calculateSignal(coin, timeframe, candles, ticker24h, context, macro, de
   const trendState = ema50 !== null && ema200 !== null && price > ema50 && ema50 > ema200 ? 1 : ema50 !== null && ema200 !== null && price < ema50 && ema50 < ema200 ? -1 : 0;
   const btcRegime = macro?.btcEma200 ? (macro.btcPrice >= macro.btcEma200 ? 1 : -1) : 0;
   const result = evaluateDotSignal({
+    assetSymbol: coin.symbol,
     above20w: sma20w === null ? null : price >= sma20w,
     activeValidators: onchain?.activeValidators ?? null,
     adx,
@@ -512,9 +586,9 @@ function calculateSignal(coin, timeframe, candles, ticker24h, context, macro, de
   return {
     symbol: coin.binanceSymbol,
     asset: coin.symbol,
-    coinId: coin.id,
-    coinName: coin.name,
-    marketCapRank: coin.marketCapRank,
+    coinId: coin.coinId,
+    coinName: coin.label,
+    marketCapRank: null,
     timeframe,
     direction,
     score: result.score,
@@ -641,7 +715,7 @@ async function sendKakaoTestMemo() {
     body: new URLSearchParams({
       template_object: JSON.stringify({
         object_type: "text",
-        text: `[연결 테스트] DOT 알림\n카카오톡 알림 연결이 정상입니다.\n전송 시각: ${sentAt}`,
+        text: `[연결 테스트] 코인 알림\n카카오톡 알림 연결이 정상입니다.\n전송 시각: ${sentAt}`,
         link: { web_url: SITE_URL, mobile_web_url: SITE_URL },
       }),
     }),

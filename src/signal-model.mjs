@@ -11,6 +11,7 @@ export function developmentContribution(index) {
 }
 
 export function evaluateDotSignal(input) {
+  const assetSymbol = input.assetSymbol || "DOT";
   const reasons = [];
   const components = {};
   const add = (key, value, reason) => {
@@ -35,16 +36,16 @@ export function evaluateDotSignal(input) {
     input.change7d == null ? "" : input.change7d > 8 ? "7일 상대 추세 강세" : input.change7d < -8 ? "7일 상대 추세 약세" : "");
 
   const newsScore = input.newsBalance >= 2 ? Math.min(10, 4 + input.newsBalance * 2) : input.newsBalance <= -2 ? -Math.min(10, 4 + Math.abs(input.newsBalance) * 2) : 0;
-  add("news", newsScore, newsScore > 0 ? "최근 DOT 뉴스에서 긍정 재료 우세" : newsScore < 0 ? "최근 DOT 뉴스에서 부정 재료 우세" : "");
+  add("news", newsScore, newsScore > 0 ? `최근 ${assetSymbol} 뉴스에서 긍정 재료 우세` : newsScore < 0 ? `최근 ${assetSymbol} 뉴스에서 부정 재료 우세` : "");
   const devScore = developmentContribution(input.developmentIndex);
   add("development", devScore, input.developmentIndex >= 0 ? `공식 GitHub 개발 지수 ${input.developmentIndex}점` : "");
   add("network", input.networkHealthy == null ? 0 : input.networkHealthy ? 2 : -8,
-    input.networkHealthy == null ? "" : input.networkHealthy ? "Polkadot 네트워크 확정 상태 정상" : "Polkadot 네트워크 동기화·확정 지연");
+    input.networkHealthy == null ? "" : input.networkHealthy ? `${assetSymbol} 네트워크 확정 상태 정상` : `${assetSymbol} 네트워크 동기화·확정 지연`);
 
   add("btcRegime", input.btcRegime * 10,
     input.btcRegime > 0 ? "BTC가 200일선 위: 알트코인 시장 환경 우호" : input.btcRegime < 0 ? "BTC가 200일선 아래: 시장 환경 방어적" : "");
   add("dotBtc", input.dotBtcChange7d == null ? 0 : input.dotBtcChange7d >= 5 ? 6 : input.dotBtcChange7d <= -5 ? -6 : 0,
-    input.dotBtcChange7d == null ? "" : input.dotBtcChange7d >= 5 ? "DOT가 최근 7일 BTC보다 강함" : input.dotBtcChange7d <= -5 ? "DOT가 최근 7일 BTC보다 약함" : "");
+    input.dotBtcChange7d == null ? "" : input.dotBtcChange7d >= 5 ? `${assetSymbol}가 최근 7일 BTC보다 강함` : input.dotBtcChange7d <= -5 ? `${assetSymbol}가 최근 7일 BTC보다 약함` : "");
 
   let derivativeScore = 0;
   if (input.openInterestChange24h != null && Math.abs(input.openInterestChange24h) >= 5) {

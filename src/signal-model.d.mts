@@ -1,6 +1,7 @@
 export type SignalDirection = "buy" | "risk" | "neutral";
 
 export interface DotSignalInput {
+  assetSymbol?: string;
   rsi: number | null;
   trendState: -1 | 0 | 1;
   above20w: boolean | null;
