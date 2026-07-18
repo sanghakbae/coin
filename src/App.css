@@ -1170,9 +1170,9 @@ dd small {
   }
 
   .ecosystemRows a {
-    grid-template-areas: "identity price marketcap";
-    grid-template-columns: minmax(0, 1fr) auto auto;
-    gap: 9px;
+    grid-template-areas: "identity price change marketcap";
+    grid-template-columns: minmax(0, 1fr) minmax(48px, auto) minmax(48px, auto) minmax(58px, auto);
+    gap: 6px;
     padding: 10px 2px;
   }
 
@@ -1192,7 +1192,7 @@ dd small {
   }
 
   .projectChange {
-    display: none;
+    grid-area: change;
   }
 
   .projectMarketCap {
@@ -1200,7 +1200,7 @@ dd small {
   }
 
   .projectValue {
-    min-width: 62px;
+    min-width: 0;
     text-align: right;
   }
 
@@ -1208,12 +1208,12 @@ dd small {
     display: block;
     margin-bottom: 2px;
     color: #66788f;
-    font-size: 8px;
+    font-size: 7px;
     font-weight: 900;
   }
 
   .projectValue strong {
-    font-size: 10px;
+    font-size: 9px;
   }
 
   .repoTracker {

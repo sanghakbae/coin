@@ -155,18 +155,7 @@ async function readPreviousState(db, signal) {
 async function syncEcosystemProjects(db) {
   const assets = ASSETS.filter((asset) => asset.ecosystemCategory);
   for (const asset of assets) {
-    const url = new URL("https://api.coingecko.com/api/v3/coins/markets");
-    url.searchParams.set("vs_currency", "usd");
-    url.searchParams.set("category", asset.ecosystemCategory);
-    url.searchParams.set("order", "market_cap_desc");
-    url.searchParams.set("per_page", "100");
-    url.searchParams.set("page", "1");
-    url.searchParams.set("sparkline", "false");
-    const response = await fetch(url, { headers: { accept: "application/json" } });
-    if (!response.ok) throw new Error(`CoinGecko ${asset.symbol} ecosystem failed: ${response.status}`);
-    const rows = (await response.json()).filter((coin) =>
-      coin.id !== asset.coinId && !isExcludedMarketCoin({ symbol: String(coin.symbol).toUpperCase(), name: coin.name }),
-    );
+    const rows = await fetchEcosystemMarketRows(asset);
     const collectionRef = db.collection("ecosystemProjects").doc(asset.symbol).collection("projects");
     const existing = await collectionRef.get();
     const knownIds = new Set(existing.docs.map((document) => document.id));
@@ -196,6 +185,31 @@ async function syncEcosystemProjects(db) {
     await batch.commit();
     console.log(`${asset.symbol} ecosystemProjects=${rows.length}, baseline=${isInitialBaseline}`);
   }
+}
+
+async function fetchEcosystemMarketRows(asset) {
+  const categories = [asset.ecosystemCategory, ...(asset.ecosystemFallbackCategories || [])].filter(Boolean);
+  const failures = [];
+  for (const category of categories) {
+    const url = new URL("https://api.coingecko.com/api/v3/coins/markets");
+    url.searchParams.set("vs_currency", "usd");
+    url.searchParams.set("category", category);
+    url.searchParams.set("order", "market_cap_desc");
+    url.searchParams.set("per_page", "100");
+    url.searchParams.set("page", "1");
+    url.searchParams.set("sparkline", "false");
+    const response = await fetch(url, { headers: { accept: "application/json" } });
+    if (!response.ok) {
+      failures.push(`${category}: ${response.status}`);
+      continue;
+    }
+    const rows = (await response.json()).filter((coin) =>
+      coin.id !== asset.coinId && !isExcludedMarketCoin({ symbol: String(coin.symbol).toUpperCase(), name: coin.name }),
+    );
+    if (rows.length) return rows;
+    failures.push(`${category}: empty`);
+  }
+  throw new Error(`CoinGecko ${asset.symbol} ecosystem failed: ${failures.join(", ") || "empty"}`);
 }
 
 function assertEnv(key) {

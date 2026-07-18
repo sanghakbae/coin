@@ -22,6 +22,8 @@ type AssetConfig = {
   networkAdapter: "polkadot" | "xrpl" | "avalanche" | "none";
   officialNewsUrl: string;
   ecosystemCategory: string | null;
+  ecosystemFallbackCategories?: string[];
+  ecosystemHeading?: string;
   ecosystemTitle: string;
   repos: AssetRepo[];
 };
@@ -922,39 +924,79 @@ async function fetchMarketInfo(asset: AssetConfig): Promise<DotMarketInfo> {
   };
 }
 
+function ecosystemCategories(asset: AssetConfig) {
+  return [asset.ecosystemCategory, ...(asset.ecosystemFallbackCategories ?? [])].filter((category): category is string => Boolean(category));
+}
+
 async function fetchEcosystemProjects(asset: AssetConfig): Promise<EcosystemProject[]> {
   if (!asset.ecosystemCategory) return [];
-  const url = new URL("https://api.coingecko.com/api/v3/coins/markets");
-  url.searchParams.set("vs_currency", "usd");
-  url.searchParams.set("category", asset.ecosystemCategory);
-  url.searchParams.set("order", "market_cap_desc");
-  url.searchParams.set("per_page", "50");
-  url.searchParams.set("page", "1");
-  url.searchParams.set("sparkline", "false");
-  url.searchParams.set("price_change_percentage", "24h");
-  const response = await fetch(url, { cache: "no-store", headers: { accept: "application/json" } });
-  if (!response.ok) throw new Error(`${asset.label} 생태계 요청 실패: ${response.status}`);
-  const rows = (await response.json()) as Array<{
-    id: string;
-    name: string;
-    symbol: string;
-    image: string;
-    current_price: number | null;
-    market_cap: number | null;
-    price_change_percentage_24h: number | null;
-  }>;
-  return rows
-    .filter((coin) => coin.id !== asset.coinId && !isStableCoin(coin))
-    .slice(0, 20)
-    .map((coin) => ({
-      id: coin.id,
-      name: coin.name,
-      symbol: coin.symbol.toUpperCase(),
-      image: coin.image,
-      price: coin.current_price,
-      marketCap: coin.market_cap,
-      change24h: coin.price_change_percentage_24h,
-    }));
+  const failures: string[] = [];
+  for (const category of ecosystemCategories(asset)) {
+    const url = new URL("https://api.coingecko.com/api/v3/coins/markets");
+    url.searchParams.set("vs_currency", "usd");
+    url.searchParams.set("category", category);
+    url.searchParams.set("order", "market_cap_desc");
+    url.searchParams.set("per_page", "100");
+    url.searchParams.set("page", "1");
+    url.searchParams.set("sparkline", "false");
+    url.searchParams.set("price_change_percentage", "24h");
+    const response = await fetch(url, { cache: "no-store", headers: { accept: "application/json" } });
+    if (!response.ok) {
+      failures.push(`${category}: ${response.status}`);
+      continue;
+    }
+    const rows = (await response.json()) as Array<{
+      id: string;
+      name: string;
+      symbol: string;
+      image: string;
+      current_price: number | null;
+      market_cap: number | null;
+      price_change_percentage_24h: number | null;
+    }>;
+    const projects = rows
+      .filter((coin) => coin.id !== asset.coinId && !isStableCoin(coin))
+      .slice(0, 20)
+      .map((coin) => ({
+        id: coin.id,
+        name: coin.name,
+        symbol: coin.symbol.toUpperCase(),
+        image: coin.image,
+        price: coin.current_price,
+        marketCap: coin.market_cap,
+        change24h: coin.price_change_percentage_24h,
+      }));
+    if (projects.length) return projects;
+    failures.push(`${category}: empty`);
+  }
+  const storedProjects = await fetchStoredEcosystemProjects(asset).catch(() => []);
+  if (storedProjects.length) return storedProjects;
+  throw new Error(`${asset.label} 생태계 요청 실패: ${failures.join(", ") || "empty"}`);
+}
+
+async function fetchStoredEcosystemProjects(asset: AssetConfig): Promise<EcosystemProject[]> {
+  const [{ collection, getDocs, limit, orderBy, query }, { db }] = await Promise.all([import("firebase/firestore"), import("./firebase")]);
+  if (!db) return [];
+  const snapshot = await getDocs(query(collection(db, "ecosystemProjects", asset.symbol, "projects"), orderBy("marketCap", "desc"), limit(20)));
+  return snapshot.docs.map((document) => {
+    const data = document.data() as {
+      name?: string;
+      symbol?: string;
+      image?: string;
+      price?: number | null;
+      marketCap?: number | null;
+      change24h?: number | null;
+    };
+    return {
+      id: document.id,
+      name: data.name ?? document.id,
+      symbol: data.symbol ?? "-",
+      image: data.image ?? "",
+      price: data.price ?? null,
+      marketCap: data.marketCap ?? null,
+      change24h: data.change24h ?? null,
+    };
+  });
 }
 
 async function fetchNewEcosystemProjects(asset: AssetConfig, currentProjects: EcosystemProject[]): Promise<NewEcosystemProject[]> {
@@ -1267,6 +1309,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [ecosystemError, setEcosystemError] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
+  const ecosystemHeading = asset.ecosystemHeading ?? `${asset.label} ${asset.ecosystemTitle}`;
 
   const indicator = useMemo(() => {
     const closes = candles.map((candle) => candle.close);
@@ -1687,7 +1730,7 @@ export default function App() {
         <div className="ecosystemTitle">
           <div className="panelTitle">
             <Network size={18} />
-            <h2>{asset.label} {asset.ecosystemTitle}</h2>
+            <h2>{ecosystemHeading}</h2>
           </div>
           <span>{asset.ecosystemTitle} 시가총액 순위 · {asset.symbol}·스테이블 코인 제외</span>
         </div>
@@ -1712,7 +1755,7 @@ export default function App() {
             <p>현재 새로 감지된 프로젝트가 없습니다. 새 프로젝트가 분류에 추가되면 여기에 표시됩니다.</p>
           )}
         </div>
-        <div className="ecosystemTable" role="table" aria-label={`${asset.label} ${asset.ecosystemTitle} 시세`}>
+        <div className="ecosystemTable" role="table" aria-label={`${ecosystemHeading} 시세`}>
           <div className="ecosystemHead" role="row">
             <span>순위 / 프로젝트</span>
             <span>현재가</span>

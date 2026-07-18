@@ -43,7 +43,8 @@
     "networkAdapter": "none",
     "officialNewsUrl": "https://chain.link/resources",
     "ecosystemCategory": "oracle",
-    "ecosystemTitle": "오라클 프로젝트",
+    "ecosystemTitle": "오라클 섹터 프로젝트",
+    "ecosystemHeading": "오라클 섹터 프로젝트",
     "repos": [
       { "owner": "smartcontractkit", "repo": "chainlink", "label": "Chainlink Core", "role": "오라클 노드 코어", "branch": "develop" },
       { "owner": "smartcontractkit", "repo": "chainlink-ccip", "label": "Chainlink CCIP", "role": "크로스체인 프로토콜", "branch": "main" },
@@ -60,6 +61,7 @@
     "networkAdapter": "avalanche",
     "officialNewsUrl": "https://www.avax.network/blog",
     "ecosystemCategory": "avalanche-ecosystem",
+    "ecosystemFallbackCategories": ["avalanche-subnet"],
     "ecosystemTitle": "생태계 프로젝트",
     "repos": [
       { "owner": "ava-labs", "repo": "avalanchego", "label": "AvalancheGo", "role": "네트워크 코어", "branch": "master" },
