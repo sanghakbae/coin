@@ -66,8 +66,11 @@ async function main() {
     await syncEcosystemProjects(db).catch((error) => console.warn(`ecosystem snapshot skipped: ${error.message}`));
   }
   const watchlist = parseWatchlist();
-  const assets = ASSETS.filter((asset) => watchlist.has(asset.binanceSymbol));
-  if (!assets.length) throw new Error(`No configured assets match WATCHLIST_SYMBOLS: ${[...watchlist].join(", ")}`);
+  let assets = ASSETS.filter((asset) => watchlist.has(asset.binanceSymbol));
+  if (!assets.length) {
+    console.warn(`No configured assets match WATCHLIST_SYMBOLS: ${[...watchlist].join(", ")}. Falling back to all configured assets.`);
+    assets = ASSETS;
+  }
   const signals = await Promise.all(assets.map((asset) => calculateAssetSignal(asset)));
 
   if (dryRun) {
@@ -120,7 +123,11 @@ function optionalDataUnavailable(name, error) {
 function parseWatchlist() {
   const raw = process.env.WATCHLIST_SYMBOLS?.trim();
   const symbols = raw
-    ? raw.split(",").map((symbol) => symbol.trim().toUpperCase()).filter(Boolean)
+    ? raw
+      .split(",")
+      .map((symbol) => symbol.trim().toUpperCase())
+      .filter(Boolean)
+      .map((symbol) => (symbol.endsWith("USDT") ? symbol : `${symbol}USDT`))
     : ASSETS.map((asset) => asset.binanceSymbol);
   return new Set(symbols);
 }
