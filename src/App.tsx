@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, ArrowDownRight, ArrowUpRight, Code2, Coins, ExternalLink, Landmark, Network, Newspaper, RefreshCw, ShieldCheck, TrendingUp } from "lucide-react";
 import xxhash from "xxhash-wasm";
 import assetsJson from "./assets.json";
+import { mergeLiveTodayCandle } from "./chart-data.mjs";
+import { calculateKimchiPremium } from "./market-comparison.mjs";
 import { evaluateDotSignal } from "./signal-model.mjs";
 
 type AssetRepo = {
@@ -16,12 +18,13 @@ type AssetConfig = {
   label: string;
   symbol: string;
   binanceSymbol: string;
-  btcSymbol: string;
+  btcSymbol: string | null;
   newsKeywords: string[];
   newsPattern: RegExp;
   networkAdapter: "polkadot" | "xrpl" | "avalanche" | "none";
   officialNewsUrl: string;
   ecosystemCategory: string | null;
+  coinMarketCapTag: string | null;
   ecosystemFallbackCategories?: string[];
   ecosystemHeading?: string;
   ecosystemTitle: string;
@@ -101,11 +104,17 @@ interface DotMarketInfo {
   marketCap: number | null;
   circulatingSupply: number | null;
   totalSupply: number | null;
+  source: "CoinMarketCap" | "CoinGecko" | "Firebase";
 }
 
 interface FxRate {
   rate: number;
   date: string;
+}
+
+interface UpbitPrices {
+  assetPriceKrw: number;
+  usdtKrw: number | null;
 }
 
 interface NetworkInfo {
@@ -184,6 +193,7 @@ interface EcosystemProject {
   name: string;
   symbol: string;
   image: string;
+  url: string;
   price: number | null;
   marketCap: number | null;
   change24h: number | null;
@@ -192,6 +202,25 @@ interface EcosystemProject {
 interface NewEcosystemProject extends EcosystemProject {
   firstSeen: number;
 }
+
+interface CoinMarketCapListing {
+  id: number;
+  name: string;
+  slug: string;
+  symbol: string;
+  tags?: string[];
+  cmc_rank: number;
+  circulating_supply: number | null;
+  total_supply: number | null;
+  quote?: Array<{
+    symbol: string;
+    price: number;
+    market_cap: number;
+    percent_change_24h: number;
+  }>;
+}
+
+let coinMarketCapCache: { expiresAt: number; rows: CoinMarketCapListing[] } | null = null;
 
 function formatNumber(value: number | null, digits = 2) {
   if (value === null || Number.isNaN(value)) return "-";
@@ -567,19 +596,38 @@ async function fetchTicker24h(symbol: string) {
   };
 }
 
-async function fetchMacroInfo(assetBtcSymbol: string): Promise<MacroInfo> {
+async function fetchUpbitPrices(assetSymbol: string): Promise<UpbitPrices> {
+  const markets = [`KRW-${assetSymbol}`, "KRW-USDT"];
+  const response = await fetch(`https://api.upbit.com/v1/ticker?markets=${markets.join(",")}`, {
+    cache: "no-store",
+    headers: { accept: "application/json" },
+  });
+  if (!response.ok) throw new Error(`Upbit 현재가 요청 실패: ${response.status}`);
+  const rows = (await response.json()) as Array<{ market: string; trade_price: number }>;
+  const assetPriceKrw = Number(rows.find((row) => row.market === `KRW-${assetSymbol}`)?.trade_price);
+  const usdtKrw = Number(rows.find((row) => row.market === "KRW-USDT")?.trade_price);
+  if (!Number.isFinite(assetPriceKrw) || assetPriceKrw <= 0) throw new Error(`Upbit KRW-${assetSymbol} 현재가 없음`);
+  return {
+    assetPriceKrw,
+    usdtKrw: Number.isFinite(usdtKrw) && usdtKrw > 0 ? usdtKrw : null,
+  };
+}
+
+async function fetchMacroInfo(assetBtcSymbol: string | null): Promise<MacroInfo> {
   const [btcRows, btcTicker, assetBtcRows] = await Promise.all([
     fetchBinanceJson("/api/v3/klines?symbol=BTCUSDT&interval=1d&limit=365") as Promise<Array<[number, string, string, string, string]>>,
     fetchBinanceJson("/api/v3/ticker/24hr?symbol=BTCUSDT") as Promise<{ lastPrice: string; priceChangePercent: string }>,
-    fetchBinanceJson(`/api/v3/klines?symbol=${assetBtcSymbol}&interval=1d&limit=30`) as Promise<Array<[number, string, string, string, string]>>,
+    assetBtcSymbol
+      ? fetchBinanceJson(`/api/v3/klines?symbol=${assetBtcSymbol}&interval=1d&limit=30`) as Promise<Array<[number, string, string, string, string]>>
+      : Promise.resolve(null),
   ]);
   const btcCloses = btcRows.map((row) => Number(row[4]));
-  const assetBtcCloses = assetBtcRows.map((row) => Number(row[4]));
+  const assetBtcCloses = assetBtcRows?.map((row) => Number(row[4])) ?? null;
   return {
     btcChange24h: Number(btcTicker.priceChangePercent),
     btcEma200: calculateEma(btcCloses, 200),
     btcPrice: Number(btcTicker.lastPrice),
-    assetBtcChange7d: calculatePeriodChange(assetBtcCloses, 7),
+    assetBtcChange7d: assetBtcCloses ? calculatePeriodChange(assetBtcCloses, 7) : null,
   };
 }
 
@@ -895,32 +943,95 @@ async function fetchNews(asset: AssetConfig): Promise<NewsItem[]> {
 }
 
 async function fetchMarketInfo(asset: AssetConfig): Promise<DotMarketInfo> {
-  const url = new URL("https://api.coingecko.com/api/v3/coins/markets");
-  url.searchParams.set("vs_currency", "usd");
-  url.searchParams.set("order", "market_cap_desc");
-  url.searchParams.set("per_page", "250");
-  url.searchParams.set("page", "1");
-  url.searchParams.set("sparkline", "false");
-  const response = await fetch(url, { cache: "no-store", headers: { accept: "application/json" } });
-  if (!response.ok) throw new Error(`CoinGecko ${asset.symbol} 데이터 요청 실패: ${response.status}`);
-  const rows = (await response.json()) as Array<{
-    id: string;
-    symbol: string;
-    name: string;
-    market_cap: number | null;
-    circulating_supply: number | null;
-    total_supply: number | null;
-  }>;
-  const withoutStablecoins = rows.filter((coin) => !isStableCoin(coin));
-  const assetIndex = withoutStablecoins.findIndex((coin) => coin.id === asset.coinId);
-  const marketAsset = withoutStablecoins[assetIndex];
-  if (!marketAsset || assetIndex < 0) throw new Error(`스테이블 코인 제외 순위에서 ${asset.symbol}를 찾지 못했습니다.`);
+  const failures: string[] = [];
+  try {
+    const rows = await fetchCoinMarketCapListings();
+    const withoutStablecoins = rows.filter((coin) => !coin.tags?.includes("stablecoin") && !isStableCoin(coin));
+    const assetIndex = withoutStablecoins.findIndex((coin) => coin.symbol === asset.symbol);
+    const marketAsset = withoutStablecoins[assetIndex];
+    const quote = marketAsset?.quote?.find((item) => item.symbol === "USD");
+    if (!marketAsset || assetIndex < 0 || !quote) throw new Error(`${asset.symbol} 데이터 없음`);
+    return {
+      rank: assetIndex + 1,
+      marketCap: quote.market_cap ?? null,
+      circulatingSupply: marketAsset.circulating_supply ?? null,
+      totalSupply: marketAsset.total_supply ?? null,
+      source: "CoinMarketCap",
+    };
+  } catch (error) {
+    failures.push(`CoinMarketCap: ${error instanceof Error ? error.message : "응답 오류"}`);
+  }
 
+  try {
+    const url = new URL("https://api.coingecko.com/api/v3/coins/markets");
+    url.searchParams.set("vs_currency", "usd");
+    url.searchParams.set("order", "market_cap_desc");
+    url.searchParams.set("per_page", "250");
+    url.searchParams.set("page", "1");
+    url.searchParams.set("sparkline", "false");
+    const response = await fetch(url, { cache: "no-store", headers: { accept: "application/json" } });
+    if (!response.ok) throw new Error(`CoinGecko ${asset.symbol} 데이터 요청 실패: ${response.status}`);
+    const rows = (await response.json()) as Array<{
+      id: string;
+      symbol: string;
+      name: string;
+      market_cap: number | null;
+      circulating_supply: number | null;
+      total_supply: number | null;
+    }>;
+    const withoutStablecoins = rows.filter((coin) => !isStableCoin(coin));
+    const assetIndex = withoutStablecoins.findIndex((coin) => coin.id === asset.coinId);
+    const marketAsset = withoutStablecoins[assetIndex];
+    if (!marketAsset || assetIndex < 0) throw new Error(`스테이블 코인 제외 순위에서 ${asset.symbol}를 찾지 못했습니다.`);
+
+    return {
+      rank: assetIndex + 1,
+      marketCap: marketAsset.market_cap ?? null,
+      circulatingSupply: marketAsset.circulating_supply ?? null,
+      totalSupply: marketAsset.total_supply ?? null,
+      source: "CoinGecko",
+    };
+  } catch (error) {
+    failures.push(`CoinGecko: ${error instanceof Error ? error.message : "응답 오류"}`);
+    const stored = await fetchStoredMarketInfo(asset).catch(() => null);
+    if (stored) return stored;
+    throw new Error(failures.join(" · "));
+  }
+}
+
+async function fetchCoinMarketCapListings(): Promise<CoinMarketCapListing[]> {
+  if (coinMarketCapCache && coinMarketCapCache.expiresAt > Date.now()) return coinMarketCapCache.rows;
+  const url = new URL("https://pro-api.coinmarketcap.com/public-api/v3/cryptocurrency/listings/latest");
+  url.searchParams.set("start", "1");
+  url.searchParams.set("limit", "1000");
+  url.searchParams.set("convert", "USD");
+  const response = await fetch(url, { cache: "no-store", headers: { accept: "application/json" } });
+  if (!response.ok) throw new Error(`목록 요청 실패: ${response.status}`);
+  const body = (await response.json()) as { data?: CoinMarketCapListing[] };
+  if (!Array.isArray(body.data) || !body.data.length) throw new Error("빈 응답");
+  coinMarketCapCache = { expiresAt: Date.now() + 5 * 60_000, rows: body.data };
+  return body.data;
+}
+
+async function fetchStoredMarketInfo(asset: AssetConfig): Promise<DotMarketInfo | null> {
+  const [{ doc, getDoc }, { db }] = await Promise.all([import("firebase/firestore"), import("./firebase")]);
+  if (!db) return null;
+  const snapshot = await getDoc(doc(db, "marketSnapshots", asset.symbol));
+  if (!snapshot.exists()) return null;
+  const data = snapshot.data() as {
+    rank?: number | null;
+    marketCap?: number | null;
+    circulatingSupply?: number | null;
+    totalSupply?: number | null;
+    source?: string;
+  };
+  if (data.rank === null || data.rank === undefined) return null;
   return {
-    rank: assetIndex + 1,
-    marketCap: marketAsset.market_cap ?? null,
-    circulatingSupply: marketAsset.circulating_supply ?? null,
-    totalSupply: marketAsset.total_supply ?? null,
+    rank: data.rank,
+    marketCap: data.marketCap ?? null,
+    circulatingSupply: data.circulatingSupply ?? null,
+    totalSupply: data.totalSupply ?? null,
+    source: data.source === "CoinMarketCap" ? "CoinMarketCap" : data.source === "CoinGecko" ? "CoinGecko" : "Firebase",
   };
 }
 
@@ -930,7 +1041,37 @@ function ecosystemCategories(asset: AssetConfig) {
 
 async function fetchEcosystemProjects(asset: AssetConfig): Promise<EcosystemProject[]> {
   if (!asset.ecosystemCategory) return [];
+  const storedProjects = await fetchStoredEcosystemProjects(asset).catch(() => []);
+  if (storedProjects.length) return storedProjects;
+
   const failures: string[] = [];
+  if (asset.coinMarketCapTag) {
+    try {
+      const rows = await fetchCoinMarketCapListings();
+      const projects = rows
+        .filter((coin) => coin.symbol !== asset.symbol && coin.tags?.includes(asset.coinMarketCapTag ?? ""))
+        .filter((coin) => !coin.tags?.includes("stablecoin") && !isStableCoin(coin))
+        .slice(0, 20)
+        .map((coin) => {
+          const quote = coin.quote?.find((item) => item.symbol === "USD");
+          return {
+            id: `cmc-${coin.id}`,
+            name: coin.name,
+            symbol: coin.symbol,
+            image: "",
+            url: `https://coinmarketcap.com/currencies/${coin.slug}/`,
+            price: quote?.price ?? null,
+            marketCap: quote?.market_cap ?? null,
+            change24h: quote?.percent_change_24h ?? null,
+          };
+        });
+      if (projects.length) return projects;
+      failures.push(`${asset.coinMarketCapTag}: empty`);
+    } catch (error) {
+      failures.push(`CoinMarketCap: ${error instanceof Error ? error.message : "응답 오류"}`);
+    }
+  }
+
   for (const category of ecosystemCategories(asset)) {
     const url = new URL("https://api.coingecko.com/api/v3/coins/markets");
     url.searchParams.set("vs_currency", "usd");
@@ -962,6 +1103,7 @@ async function fetchEcosystemProjects(asset: AssetConfig): Promise<EcosystemProj
         name: coin.name,
         symbol: coin.symbol.toUpperCase(),
         image: coin.image,
+        url: `https://www.coingecko.com/en/coins/${coin.id}`,
         price: coin.current_price,
         marketCap: coin.market_cap,
         change24h: coin.price_change_percentage_24h,
@@ -969,34 +1111,36 @@ async function fetchEcosystemProjects(asset: AssetConfig): Promise<EcosystemProj
     if (projects.length) return projects;
     failures.push(`${category}: empty`);
   }
-  const storedProjects = await fetchStoredEcosystemProjects(asset).catch(() => []);
-  if (storedProjects.length) return storedProjects;
   throw new Error(`${asset.label} 생태계 요청 실패: ${failures.join(", ") || "empty"}`);
 }
 
 async function fetchStoredEcosystemProjects(asset: AssetConfig): Promise<EcosystemProject[]> {
   const [{ collection, getDocs, limit, orderBy, query }, { db }] = await Promise.all([import("firebase/firestore"), import("./firebase")]);
   if (!db) return [];
-  const snapshot = await getDocs(query(collection(db, "ecosystemProjects", asset.symbol, "projects"), orderBy("marketCap", "desc"), limit(20)));
+  const snapshot = await getDocs(query(collection(db, "ecosystemProjects", asset.symbol, "projects"), orderBy("marketCap", "desc"), limit(100)));
   return snapshot.docs.map((document) => {
     const data = document.data() as {
       name?: string;
       symbol?: string;
       image?: string;
+      sourceUrl?: string;
       price?: number | null;
       marketCap?: number | null;
       change24h?: number | null;
+      active?: boolean;
     };
     return {
       id: document.id,
       name: data.name ?? document.id,
       symbol: data.symbol ?? "-",
       image: data.image ?? "",
+      url: data.sourceUrl ?? `https://www.coingecko.com/en/coins/${document.id}`,
       price: data.price ?? null,
       marketCap: data.marketCap ?? null,
       change24h: data.change24h ?? null,
+      active: data.active ?? true,
     };
-  });
+  }).filter((project) => project.active).slice(0, 20);
 }
 
 async function fetchNewEcosystemProjects(asset: AssetConfig, currentProjects: EcosystemProject[]): Promise<NewEcosystemProject[]> {
@@ -1014,25 +1158,29 @@ async function fetchNewEcosystemProjects(asset: AssetConfig, currentProjects: Ec
             name?: string;
             symbol?: string;
             image?: string;
+            sourceUrl?: string;
             price?: number | null;
             marketCap?: number | null;
             change24h?: number | null;
             firstSeen?: { toMillis?: () => number };
             isBaseline?: boolean;
+            active?: boolean;
           };
           return {
             id: document.id,
             name: data.name ?? document.id,
             symbol: data.symbol ?? "-",
             image: data.image ?? "",
+            url: data.sourceUrl ?? `https://www.coingecko.com/en/coins/${document.id}`,
             price: data.price ?? null,
             marketCap: data.marketCap ?? null,
             change24h: data.change24h ?? null,
             firstSeen: data.firstSeen?.toMillis?.() ?? 0,
             isBaseline: data.isBaseline ?? true,
+            active: data.active ?? true,
           };
         })
-        .filter((project) => !project.isBaseline && project.firstSeen >= cutoff)
+        .filter((project) => project.active && !project.isBaseline && project.firstSeen >= cutoff)
         .sort((left, right) => right.firstSeen - left.firstSeen)
         .slice(0, 6);
     };
@@ -1188,11 +1336,21 @@ async function fetchStoredOnchainInfo(): Promise<OnchainInfo | null> {
   };
 }
 
-function DotChart({ asset, candles, range }: { asset: AssetConfig; candles: Candle[]; range: ChartRange }) {
+function DotChart({
+  asset,
+  candles,
+  range,
+  ticker,
+}: {
+  asset: AssetConfig;
+  candles: Candle[];
+  range: ChartRange;
+  ticker: { price: number; volume: number } | null;
+}) {
   const width = 960;
   const height = 250;
   const padding = 18;
-  const visibleCandles = sliceByRange(candles, range);
+  const visibleCandles = sliceByRange(mergeLiveTodayCandle(candles, ticker), range);
   const values = visibleCandles.map((candle) => candle.close);
   const times = visibleCandles.map((candle) => candle.openTime);
   const path = chartPath(values, width, height, padding);
@@ -1266,6 +1424,7 @@ function DotChart({ asset, candles, range }: { asset: AssetConfig; candles: Cand
               {marker.label}
             </span>
           ))}
+          <span className="todayLabel">오늘</span>
         </div>
         {last !== null && (
           <span className="currentPriceTag" style={{ top: `${currentTop}%`, borderColor: stroke, color: stroke }}>
@@ -1294,6 +1453,7 @@ export default function App() {
   const [storedDevelopmentIndex, setStoredDevelopmentIndex] = useState<number | null>(null);
   const [marketInfo, setMarketInfo] = useState<DotMarketInfo | null>(null);
   const [fxRate, setFxRate] = useState<FxRate | null>(null);
+  const [upbitPrices, setUpbitPrices] = useState<UpbitPrices | null>(null);
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
   const [xrplInfo, setXrplInfo] = useState<XrplInfo | null>(null);
   const [avalancheInfo, setAvalancheInfo] = useState<AvalancheInfo | null>(null);
@@ -1309,6 +1469,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [ecosystemError, setEcosystemError] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
+  const loadRequestRef = useRef(0);
   const ecosystemHeading = asset.ecosystemHeading ?? `${asset.label} ${asset.ecosystemTitle}`;
 
   const indicator = useMemo(() => {
@@ -1342,6 +1503,7 @@ export default function App() {
   }, [asset, avalancheInfo, candles, derivativesInfo, devItems, etfInfo, macroInfo, networkInfo, news, onchainInfo, storedDevelopmentIndex, ticker, xrplInfo]);
 
   async function loadData() {
+    const requestId = ++loadRequestRef.current;
     setLoading(true);
     setAssessmentReady(false);
     setError(null);
@@ -1352,6 +1514,7 @@ export default function App() {
     setDevItems([]);
     setStoredDevelopmentIndex(null);
     setMarketInfo(null);
+    setUpbitPrices(null);
     setNetworkInfo(null);
     setXrplInfo(null);
     setAvalancheInfo(null);
@@ -1362,13 +1525,14 @@ export default function App() {
     setEcosystemProjects([]);
     setNewEcosystemProjects([]);
     try {
-      const [candlesResult, tickerResult, newsResult, devResult, marketResult, fxResult, networkResult, xrplResult, avalancheResult, ecosystemResult, macroResult, derivativesResult, onchainResult, etfResult, storedDevelopmentResult] = await Promise.allSettled([
+      const [candlesResult, tickerResult, newsResult, devResult, marketResult, fxResult, upbitResult, networkResult, xrplResult, avalancheResult, ecosystemResult, macroResult, derivativesResult, onchainResult, etfResult, storedDevelopmentResult] = await Promise.allSettled([
         fetchCandles(asset.binanceSymbol),
         fetchTicker24h(asset.binanceSymbol),
         fetchNews(asset),
         fetchDevStatus(asset.repos),
         fetchMarketInfo(asset),
         fetchUsdKrw(),
+        fetchUpbitPrices(asset.symbol),
         asset.networkAdapter === "polkadot" ? fetchNetworkInfo() : Promise.resolve(null),
         asset.networkAdapter === "xrpl" ? fetchXrplInfo() : Promise.resolve(null),
         asset.networkAdapter === "avalanche" ? fetchAvalancheInfo() : Promise.resolve(null),
@@ -1380,12 +1544,18 @@ export default function App() {
         fetchStoredDevelopmentIndex(asset.binanceSymbol),
       ] as const);
 
+      const newProjects = ecosystemResult.status === "fulfilled"
+        ? await fetchNewEcosystemProjects(asset, ecosystemResult.value).catch(() => [])
+        : [];
+      if (requestId !== loadRequestRef.current) return;
+
       if (candlesResult.status === "fulfilled") setCandles(candlesResult.value);
       if (tickerResult.status === "fulfilled") setTicker(tickerResult.value);
       if (newsResult.status === "fulfilled") setNews(newsResult.value);
       if (devResult.status === "fulfilled") setDevItems(devResult.value);
       if (marketResult.status === "fulfilled") setMarketInfo(marketResult.value);
       if (fxResult.status === "fulfilled") setFxRate(fxResult.value);
+      if (upbitResult.status === "fulfilled") setUpbitPrices(upbitResult.value);
       if (networkResult.status === "fulfilled") setNetworkInfo(networkResult.value);
       if (xrplResult.status === "fulfilled") setXrplInfo(xrplResult.value);
       if (avalancheResult.status === "fulfilled") setAvalancheInfo(avalancheResult.value);
@@ -1396,7 +1566,7 @@ export default function App() {
       if (storedDevelopmentResult.status === "fulfilled") setStoredDevelopmentIndex(storedDevelopmentResult.value);
       if (ecosystemResult.status === "fulfilled") {
         setEcosystemProjects(ecosystemResult.value);
-        setNewEcosystemProjects(await fetchNewEcosystemProjects(asset, ecosystemResult.value).catch(() => []));
+        setNewEcosystemProjects(newProjects);
       } else if (asset.ecosystemCategory) {
         setEcosystemError(ecosystemResult.reason instanceof Error ? ecosystemResult.reason.message : "생태계 데이터를 불러오지 못했습니다.");
       }
@@ -1426,9 +1596,11 @@ export default function App() {
       );
       if (candlesResult.status === "fulfilled" || tickerResult.status === "fulfilled") setUpdatedAt(new Date());
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : `${asset.symbol} 데이터를 불러오지 못했습니다.`);
+      if (requestId === loadRequestRef.current) {
+        setError(loadError instanceof Error ? loadError.message : `${asset.symbol} 데이터를 불러오지 못했습니다.`);
+      }
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestRef.current) setLoading(false);
     }
   }
 
@@ -1500,6 +1672,22 @@ export default function App() {
           <small>Binance 24hr ticker</small>
         </div>
         <div className="metric">
+          <span>김치 프리미엄</span>
+          {(() => {
+            const conversionRate = upbitPrices?.usdtKrw ?? fxRate?.rate ?? null;
+            const premium = calculateKimchiPremium(upbitPrices?.assetPriceKrw ?? null, ticker?.price ?? null, conversionRate);
+            return (
+              <>
+                <strong className={premium !== null && premium >= 0 ? "upText" : "downText"}>{formatPercent(premium)}</strong>
+                <small>
+                  업비트 {formatKrw(upbitPrices?.assetPriceKrw ?? null)} · Binance 환산 {formatKrw(ticker && conversionRate ? ticker.price * conversionRate : null)}
+                </small>
+                <small>{upbitPrices?.usdtKrw ? `업비트 USDT ${formatNumber(upbitPrices.usdtKrw, 0)}원 기준` : "원달러 환율 기준"}</small>
+              </>
+            );
+          })()}
+        </div>
+        <div className="metric">
           <span>RSI</span>
           <strong>{formatNumber(indicator.rsi)}</strong>
           <small>{indicator.rsi !== null && indicator.rsi <= 30 ? "과매도" : indicator.rsi !== null && indicator.rsi >= 70 ? "과열" : "중립"}</small>
@@ -1512,7 +1700,7 @@ export default function App() {
         <div className="metric">
           <span>시가총액 순위</span>
           <strong>#{marketInfo?.rank ?? "-"}</strong>
-          <small>스테이블 코인 제외 · {formatUsdCompact(marketInfo?.marketCap ?? null)}</small>
+          <small>스테이블 코인 제외 · {formatUsdCompact(marketInfo?.marketCap ?? null)} · {marketInfo?.source ?? "조회 중"}</small>
         </div>
         <div className="metric">
           <span>24시간 거래대금</span>
@@ -1567,7 +1755,7 @@ export default function App() {
         ))}
       </div>
 
-      <DotChart asset={asset} candles={candles} range={range} />
+      <DotChart asset={asset} candles={candles} range={range} ticker={ticker} />
 
       <section className="panel reasonPanel">
         <div className="panelTitle">
@@ -1742,7 +1930,7 @@ export default function App() {
           {newEcosystemProjects.length ? (
             <div className="newProjectList">
               {newEcosystemProjects.map((project) => (
-                <a href={`https://www.coingecko.com/en/coins/${project.id}`} key={project.id} rel="noreferrer" target="_blank">
+                <a href={project.url} key={project.id} rel="noreferrer" target="_blank">
                   {project.image && <img alt="" height="22" src={project.image} width="22" />}
                   <span>
                     <b>{project.name}</b>
@@ -1764,10 +1952,12 @@ export default function App() {
           </div>
           <div className="ecosystemRows">
             {ecosystemProjects.map((project, index) => (
-              <a href={`https://www.coingecko.com/en/coins/${project.id}`} key={project.id} rel="noreferrer" role="row" target="_blank">
+              <a href={project.url} key={project.id} rel="noreferrer" role="row" target="_blank">
                 <div className="projectIdentity">
                   <b>#{index + 1}</b>
-                  <img alt="" height="28" loading="lazy" src={project.image} width="28" />
+                  {project.image
+                    ? <img alt="" height="28" loading="lazy" src={project.image} width="28" />
+                    : <Coins aria-hidden="true" size={24} />}
                   <div>
                     <strong>{project.name}</strong>
                     <span>{project.symbol}</span>
@@ -1789,7 +1979,7 @@ export default function App() {
             ))}
             {!ecosystemProjects.length && (
               <div className="ecosystemEmpty">
-                {ecosystemError ? `CoinGecko ${friendlyDataError(ecosystemError)}` : "생태계 시세를 불러오는 중입니다."}
+                {ecosystemError ? `생태계 데이터 ${friendlyDataError(ecosystemError)}` : "생태계 시세를 불러오는 중입니다."}
               </div>
             )}
           </div>

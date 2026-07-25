@@ -1,0 +1,42 @@
+name: Ecosystem Project Sync
+
+on:
+  schedule:
+    - cron: "7 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduled-coin-alerts
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      FIREBASE_SERVICE_ACCOUNT_COIN_F1318: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_COIN_F1318 }}
+      ECOSYSTEM_ONLY: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install function dependencies
+        run: npm --prefix functions ci
+
+      - name: Check Firebase credentials
+        run: |
+          if [ -z "$FIREBASE_SERVICE_ACCOUNT_COIN_F1318" ]; then
+            echo "::error::Missing GitHub secret: FIREBASE_SERVICE_ACCOUNT_COIN_F1318"
+            exit 1
+          fi
+
+      - name: Refresh ecosystem project cache
+        run: node scripts/github-scheduled-alert.mjs

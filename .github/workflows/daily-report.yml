@@ -1,15 +1,10 @@
-name: Scheduled Coin Alerts
+name: Daily Coin Report
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    # GitHub cron is UTC. 13:00 UTC is 22:00 Asia/Seoul.
+    - cron: "0 13 * * *"
   workflow_dispatch:
-    inputs:
-      test_kakao:
-        description: "카카오 나에게 보내기 연결 테스트만 실행"
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -19,7 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  scan:
+  report:
     runs-on: ubuntu-latest
     env:
       FIREBASE_SERVICE_ACCOUNT_COIN_F1318: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_COIN_F1318 }}
@@ -27,7 +22,7 @@ jobs:
       KAKAO_CLIENT_SECRET: ${{ secrets.KAKAO_CLIENT_SECRET }}
       KAKAO_REFRESH_TOKEN: ${{ secrets.KAKAO_REFRESH_TOKEN }}
       SITE_URL: https://dot.sanghak.kr
-      KAKAO_TEST_MESSAGE: ${{ inputs.test_kakao || 'false' }}
+      DAILY_REPORT: "true"
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
@@ -42,14 +37,10 @@ jobs:
       - name: Install function dependencies
         run: npm --prefix functions ci
 
-      - name: Check alert secrets
+      - name: Check report secrets
         run: |
           missing=0
-          required_keys="KAKAO_REST_API_KEY KAKAO_REFRESH_TOKEN"
-          if [ "$KAKAO_TEST_MESSAGE" != "true" ]; then
-            required_keys="FIREBASE_SERVICE_ACCOUNT_COIN_F1318 $required_keys"
-          fi
-          for key in $required_keys; do
+          for key in FIREBASE_SERVICE_ACCOUNT_COIN_F1318 KAKAO_REST_API_KEY KAKAO_REFRESH_TOKEN; do
             if [ -z "${!key}" ]; then
               echo "::error::Missing GitHub secret: $key"
               missing=1
@@ -57,5 +48,5 @@ jobs:
           done
           exit "$missing"
 
-      - name: Scan coins or send Kakao test
+      - name: Send daily Kakao report
         run: node scripts/github-scheduled-alert.mjs

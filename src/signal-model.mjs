@@ -43,7 +43,11 @@ export function evaluateDotSignal(input) {
     input.networkHealthy == null ? "" : input.networkHealthy ? `${assetSymbol} 네트워크 확정 상태 정상` : `${assetSymbol} 네트워크 동기화·확정 지연`);
 
   add("btcRegime", input.btcRegime * 10,
-    input.btcRegime > 0 ? "BTC가 200일선 위: 알트코인 시장 환경 우호" : input.btcRegime < 0 ? "BTC가 200일선 아래: 시장 환경 방어적" : "");
+    input.btcRegime > 0
+      ? assetSymbol === "BTC" ? "BTC가 200일선 위: 장기 시장 환경 우호" : "BTC가 200일선 위: 알트코인 시장 환경 우호"
+      : input.btcRegime < 0
+        ? assetSymbol === "BTC" ? "BTC가 200일선 아래: 장기 시장 환경 방어적" : "BTC가 200일선 아래: 시장 환경 방어적"
+        : "");
   add("dotBtc", input.dotBtcChange7d == null ? 0 : input.dotBtcChange7d >= 5 ? 6 : input.dotBtcChange7d <= -5 ? -6 : 0,
     input.dotBtcChange7d == null ? "" : input.dotBtcChange7d >= 5 ? `${assetSymbol}가 최근 7일 BTC보다 강함` : input.dotBtcChange7d <= -5 ? `${assetSymbol}가 최근 7일 BTC보다 약함` : "");
 

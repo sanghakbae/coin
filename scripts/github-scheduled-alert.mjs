@@ -1,4 +1,6 @@
 import { createRequire } from "node:module";
+import { getAlertType } from "./alert-policy.mjs";
+import { formatDailyReportMessage, getKoreanDateKey, splitKakaoText } from "./daily-report-message.mjs";
 import { evaluateDotSignal } from "../src/signal-model.mjs";
 
 const require = createRequire(new URL("../functions/package.json", import.meta.url));
@@ -8,7 +10,6 @@ const xxhash = require("xxhash-wasm");
 const ASSETS_BY_KEY = require("../src/assets.json");
 
 const CANDLE_LIMIT = 365;
-const PUMP_ALERT_THRESHOLD = 10;
 const SITE_URL = process.env.SITE_URL || "https://dot.sanghak.kr";
 const BINANCE_API_BASES = ["https://data-api.binance.vision", "https://api.binance.com", "https://api1.binance.com"];
 const POLKADOT_RELAY_RPC_ENDPOINTS = ["https://rpc.polkadot.io", "https://polkadot-rpc.publicnode.com"];
@@ -46,6 +47,8 @@ main().catch((error) => {
 
 async function main() {
   const dryRun = process.env.DRY_RUN === "true";
+  const dailyReport = process.env.DAILY_REPORT === "true";
+  const ecosystemOnly = process.env.ECOSYSTEM_ONLY === "true";
 
   if (process.env.KAKAO_TEST_MESSAGE === "true") {
     assertEnv("KAKAO_REST_API_KEY");
@@ -57,21 +60,37 @@ async function main() {
 
   let db = null;
   if (!dryRun) {
-    assertEnv("KAKAO_REST_API_KEY");
-    assertEnv("KAKAO_REFRESH_TOKEN");
+    if (!ecosystemOnly) {
+      assertEnv("KAKAO_REST_API_KEY");
+      assertEnv("KAKAO_REFRESH_TOKEN");
+    }
     assertEnv("FIREBASE_SERVICE_ACCOUNT_COIN_F1318");
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_COIN_F1318);
     if (!getApps().length) initializeApp({ credential: cert(serviceAccount) });
     db = getFirestore();
-    await syncEcosystemProjects(db).catch((error) => console.warn(`ecosystem snapshot skipped: ${error.message}`));
+  }
+  if (ecosystemOnly) {
+    if (!db) throw new Error("Ecosystem sync requires Firebase credentials.");
+    await syncEcosystemProjects(db);
+    return;
   }
   const watchlist = parseWatchlist();
-  let assets = ASSETS.filter((asset) => watchlist.has(asset.binanceSymbol));
+  let assets = dailyReport ? ASSETS : ASSETS.filter((asset) => watchlist.has(asset.binanceSymbol));
   if (!assets.length) {
     console.warn(`No configured assets match WATCHLIST_SYMBOLS: ${[...watchlist].join(", ")}. Falling back to all configured assets.`);
     assets = ASSETS;
   }
-  const signals = await Promise.all(assets.map((asset) => calculateAssetSignal(asset)));
+  const [calculatedSignals, marketSnapshots] = await Promise.all([
+    Promise.all(assets.map((asset) => calculateAssetSignal(asset))),
+    fetchMarketSnapshots().catch((error) => {
+      console.warn(`market snapshots unavailable: ${error.message}`);
+      return new Map();
+    }),
+  ]);
+  const signals = calculatedSignals.map((signal) => ({
+    ...signal,
+    ...(marketSnapshots.get(signal.asset) ?? {}),
+  }));
 
   if (dryRun) {
     console.log(JSON.stringify(signals.map((signal) => ({
@@ -79,6 +98,8 @@ async function main() {
       symbol: signal.symbol,
       direction: signal.direction,
       score: signal.score,
+      marketCapRank: signal.marketCapRank,
+      marketCap: signal.marketCap ?? null,
       confidence: signal.confidence,
       riskLevel: signal.riskLevel,
       components: signal.components,
@@ -97,18 +118,20 @@ async function main() {
 
   await saveSignals(db, signals);
 
+  if (dailyReport) {
+    await sendDailyReportOnce(db, signals);
+    return;
+  }
+
   for (const signal of signals) {
     const previous = await readPreviousState(db, signal);
-    const hasPreviousState = previous !== null;
-    const enteredSignal = hasPreviousState && signal.direction !== "neutral" && previous.direction !== signal.direction;
-    const crossedPositive = hasPreviousState && previous.score <= 0 && signal.score > 0;
-    const crossedPump = hasPreviousState && previous.dayChangePercent < PUMP_ALERT_THRESHOLD && (signal.dayChangePercent ?? 0) >= PUMP_ALERT_THRESHOLD;
+    const alertType = getAlertType(previous, signal);
 
-    if (enteredSignal) {
+    if (alertType === "signal") {
       await sendKakaoMemo(signal);
-    } else if (crossedPositive) {
+    } else if (alertType === "positive") {
       await sendKakaoMemo(signal, "positive", previous.score);
-    } else if (crossedPump) {
+    } else if (alertType === "pump") {
       await sendKakaoMemo(signal, "pump");
     }
     await updateCurrentState(db, signal);
@@ -161,40 +184,84 @@ async function readPreviousState(db, signal) {
 
 async function syncEcosystemProjects(db) {
   const assets = ASSETS.filter((asset) => asset.ecosystemCategory);
+  const coinMarketCapRows = await fetchCoinMarketCapListings().catch((error) => {
+    console.warn(`CoinMarketCap ecosystem source unavailable: ${error.message}`);
+    return [];
+  });
   for (const asset of assets) {
-    const rows = await fetchEcosystemMarketRows(asset);
-    const collectionRef = db.collection("ecosystemProjects").doc(asset.symbol).collection("projects");
-    const existing = await collectionRef.get();
-    const knownIds = new Set(existing.docs.map((document) => document.id));
-    const isInitialBaseline = existing.empty;
-    const batch = db.batch();
+    try {
+      const rows = await fetchEcosystemMarketRows(asset, coinMarketCapRows);
+      const collectionRef = db.collection("ecosystemProjects").doc(asset.symbol).collection("projects");
+      const existing = await collectionRef.get();
+      const knownIds = new Set(existing.docs.map((document) => document.id));
+      const currentIds = new Set(rows.map((coin) => coin.id));
+      const isInitialBaseline = existing.empty;
+      const batch = db.batch();
 
-    for (const coin of rows) {
-      const isNew = !knownIds.has(coin.id);
-      batch.set(
-        collectionRef.doc(coin.id),
-        {
-          assetSymbol: asset.symbol,
-          category: asset.ecosystemCategory,
-          name: coin.name,
-          symbol: String(coin.symbol).toUpperCase(),
-          image: coin.image || "",
-          price: coin.current_price ?? null,
-          marketCap: coin.market_cap ?? null,
-          change24h: coin.price_change_percentage_24h ?? null,
-          active: true,
-          updatedAt: FieldValue.serverTimestamp(),
-          ...(isNew ? { firstSeen: FieldValue.serverTimestamp(), isBaseline: isInitialBaseline } : {}),
-        },
-        { merge: true },
-      );
+      for (const document of existing.docs) {
+        if (!currentIds.has(document.id)) {
+          batch.set(document.ref, { active: false, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+        }
+      }
+
+      for (const coin of rows) {
+        const isNew = !knownIds.has(coin.id);
+        batch.set(
+          collectionRef.doc(coin.id),
+          {
+            assetSymbol: asset.symbol,
+            category: asset.ecosystemCategory,
+            name: coin.name,
+            symbol: String(coin.symbol).toUpperCase(),
+            image: coin.image || "",
+            source: coin.source || "CoinGecko",
+            sourceUrl: coin.source_url || `https://www.coingecko.com/en/coins/${coin.id}`,
+            price: coin.current_price ?? null,
+            marketCap: coin.market_cap ?? null,
+            change24h: coin.price_change_percentage_24h ?? null,
+            active: true,
+            updatedAt: FieldValue.serverTimestamp(),
+            ...(isNew ? { firstSeen: FieldValue.serverTimestamp(), isBaseline: isInitialBaseline } : {}),
+          },
+          { merge: true },
+        );
+      }
+      await batch.commit();
+      console.log(`${asset.symbol} ecosystemProjects=${rows.length}, baseline=${isInitialBaseline}`);
+    } catch (error) {
+      console.warn(`${asset.symbol} ecosystem snapshot skipped: ${error.message}`);
     }
-    await batch.commit();
-    console.log(`${asset.symbol} ecosystemProjects=${rows.length}, baseline=${isInitialBaseline}`);
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
 }
 
-async function fetchEcosystemMarketRows(asset) {
+async function fetchEcosystemMarketRows(asset, coinMarketCapRows = []) {
+  if (asset.coinMarketCapTag && coinMarketCapRows.length) {
+    const rows = coinMarketCapRows
+      .filter((coin) =>
+        coin.symbol !== asset.symbol
+        && coin.tags?.includes(asset.coinMarketCapTag)
+        && !coin.tags?.includes("stablecoin")
+        && !isExcludedMarketCoin({ symbol: String(coin.symbol).toUpperCase(), name: coin.name }),
+      )
+      .slice(0, 100)
+      .map((coin) => {
+        const quote = coin.quote?.find((item) => item.symbol === "USD");
+        return {
+          id: `cmc-${coin.id}`,
+          name: coin.name,
+          symbol: coin.symbol,
+          image: "",
+          source: "CoinMarketCap",
+          source_url: `https://coinmarketcap.com/currencies/${coin.slug}/`,
+          current_price: quote?.price ?? null,
+          market_cap: quote?.market_cap ?? null,
+          price_change_percentage_24h: quote?.percent_change_24h ?? null,
+        };
+      });
+    if (rows.length) return rows;
+  }
+
   const categories = [asset.ecosystemCategory, ...(asset.ecosystemFallbackCategories || [])].filter(Boolean);
   const failures = [];
   for (const category of categories) {
@@ -226,6 +293,90 @@ function assertEnv(key) {
 function isExcludedMarketCoin(coin) {
   if (EXCLUDED_ASSETS.has(coin.symbol)) return true;
   return /\b(stablecoin|usd|dollar)\b/i.test(coin.name);
+}
+
+async function fetchMarketSnapshots() {
+  try {
+    const rows = await fetchCoinMarketCapListings();
+    const ranked = rows.filter((coin) =>
+      !coin.tags?.includes("stablecoin")
+      && !isExcludedMarketCoin({ symbol: String(coin.symbol).toUpperCase(), name: coin.name }),
+    );
+    return new Map(ASSETS.flatMap((asset) => {
+      const index = ranked.findIndex((coin) => coin.symbol === asset.symbol);
+      if (index < 0) return [];
+      const coin = ranked[index];
+      const quote = coin.quote?.find((item) => item.symbol === "USD");
+      if (!quote) return [];
+      return [[asset.symbol, {
+        marketCapRank: index + 1,
+        marketCap: quote.market_cap ?? null,
+        circulatingSupply: coin.circulating_supply ?? null,
+        totalSupply: coin.total_supply ?? null,
+        marketDataSource: "CoinMarketCap",
+      }]];
+    }));
+  } catch (error) {
+    console.warn(`CoinMarketCap market snapshots unavailable: ${error.message}`);
+  }
+
+  return fetchCoinGeckoMarketSnapshots();
+}
+
+async function fetchCoinMarketCapListings() {
+  const url = new URL("https://pro-api.coinmarketcap.com/public-api/v3/cryptocurrency/listings/latest");
+  url.searchParams.set("start", "1");
+  url.searchParams.set("limit", "1000");
+  url.searchParams.set("convert", "USD");
+  const response = await fetch(url, {
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw new Error(`listings ${response.status}`);
+  const body = await response.json();
+  if (!Array.isArray(body.data) || !body.data.length) throw new Error("empty listings response");
+  return body.data;
+}
+
+async function fetchCoinGeckoMarketSnapshots() {
+  const url = new URL("https://api.coingecko.com/api/v3/coins/markets");
+  url.searchParams.set("vs_currency", "usd");
+  url.searchParams.set("order", "market_cap_desc");
+  url.searchParams.set("per_page", "250");
+  url.searchParams.set("page", "1");
+  url.searchParams.set("sparkline", "false");
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) throw new Error(`CoinGecko markets ${response.status}`);
+      const rows = await response.json();
+      const ranked = rows.filter((coin) => !isExcludedMarketCoin({
+        symbol: String(coin.symbol).toUpperCase(),
+        name: coin.name,
+      }));
+      return new Map(ASSETS.flatMap((asset) => {
+        const index = ranked.findIndex((coin) => coin.id === asset.coinId);
+        if (index < 0) return [];
+        const coin = ranked[index];
+        return [[asset.symbol, {
+          marketCapRank: index + 1,
+          marketCap: coin.market_cap ?? null,
+          circulatingSupply: coin.circulating_supply ?? null,
+          totalSupply: coin.total_supply ?? null,
+          marketDataSource: "CoinGecko",
+        }]];
+      }));
+    } catch (error) {
+      lastError = error;
+      if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 750));
+    }
+  }
+  throw lastError ?? new Error("CoinGecko markets request failed");
 }
 
 async function fetchBinanceCandles(symbol, interval, limit) {
@@ -270,15 +421,15 @@ async function fetchMacroInfo(assetBtcSymbol) {
   const [btcCandles, btcTicker, assetBtcCandles] = await Promise.all([
     fetchBinanceCandles("BTCUSDT", "1d", 365),
     fetchBinanceTicker24h("BTCUSDT"),
-    fetchBinanceCandles(assetBtcSymbol, "1d", 30),
+    assetBtcSymbol ? fetchBinanceCandles(assetBtcSymbol, "1d", 30) : Promise.resolve(null),
   ]);
   const btcCloses = btcCandles.map((candle) => candle.close);
-  const assetBtcCloses = assetBtcCandles.map((candle) => candle.close);
+  const assetBtcCloses = assetBtcCandles?.map((candle) => candle.close) ?? null;
   return {
     btcChange24h: btcTicker.changePercent,
     btcEma200: calculateEma(btcCloses, 200),
     btcPrice: btcTicker.price,
-    dotBtcChange7d: calculatePeriodChange(assetBtcCloses, 7),
+    dotBtcChange7d: assetBtcCloses ? calculatePeriodChange(assetBtcCloses, 7) : null,
   };
 }
 
@@ -651,7 +802,7 @@ async function saveSignals(db, signals) {
   const batch = db.batch();
   const runRef = db.collection("scanRuns").doc();
   batch.set(runRef, {
-    source: "github_actions_binance_coingecko",
+    source: "github_actions_multi_source",
     universeCount: signals.length,
     signalCount: signals.length,
     createdAt: FieldValue.serverTimestamp(),
@@ -663,6 +814,17 @@ async function saveSignals(db, signals) {
       runId: runRef.id,
       createdAt: FieldValue.serverTimestamp(),
     });
+    if (signal.marketCap !== null && signal.marketCap !== undefined) {
+      batch.set(db.collection("marketSnapshots").doc(signal.asset), {
+        asset: signal.asset,
+        rank: signal.marketCapRank,
+        marketCap: signal.marketCap,
+        circulatingSupply: signal.circulatingSupply,
+        totalSupply: signal.totalSupply,
+        source: signal.marketDataSource ?? "unknown",
+        updatedAt: FieldValue.serverTimestamp(),
+      }, { merge: true });
+    }
   }
 
   await batch.commit();
@@ -685,8 +847,39 @@ async function updateCurrentState(db, signal) {
     );
 }
 
+async function sendDailyReportOnce(db, signals) {
+  const dateKey = getKoreanDateKey();
+  const reportRef = db.collection("notificationState").doc(`daily-report-${dateKey}`);
+  const shouldSend = await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(reportRef);
+    if (snapshot.exists) return false;
+    transaction.set(reportRef, {
+      status: "sending",
+      dateKey,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return true;
+  });
+
+  if (!shouldSend) {
+    console.log(`Daily Kakao report already processed for ${dateKey}.`);
+    return;
+  }
+
+  try {
+    await sendKakaoText(formatDailyReportMessage(signals), "daily report");
+    await reportRef.set({
+      status: "sent",
+      sentAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+    console.log(`Daily Kakao report sent for ${dateKey}: ${signals.map((signal) => signal.asset).join(", ")}`);
+  } catch (error) {
+    await reportRef.delete();
+    throw error;
+  }
+}
+
 async function sendKakaoMemo(signal, alertType = "signal", previousScore = null) {
-  const accessToken = await refreshKakaoAccessToken();
   const asset = signal.symbol.endsWith("USDT") ? signal.symbol.slice(0, -4) : signal.symbol;
   const label = alertType === "positive" ? "종합점수 플러스 전환" : alertType === "pump" ? "10% 이상 상승" : signal.direction === "buy" ? "매수 신호" : "매도 신호";
   const detail = alertType === "positive"
@@ -702,22 +895,32 @@ async function sendKakaoMemo(signal, alertType = "signal", previousScore = null)
 개발 지수: ${signal.developmentIndex}/100
 ${detail}`;
 
-  const response = await fetch("https://kapi.kakao.com/v2/api/talk/memo/default/send", {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${accessToken}`,
-      "content-type": "application/x-www-form-urlencoded;charset=utf-8",
-    },
-    body: new URLSearchParams({
-      template_object: JSON.stringify({
-        object_type: "text",
-        text: message,
-        link: { web_url: SITE_URL, mobile_web_url: SITE_URL },
-      }),
-    }),
-  });
+  await sendKakaoText(message, "alert");
+}
 
-  if (!response.ok) throw new Error(`Kakao send failed: ${response.status} ${await response.text()}`);
+async function sendKakaoText(message, label) {
+  const accessToken = await refreshKakaoAccessToken();
+  const chunks = splitKakaoText(message);
+  for (const [index, chunk] of chunks.entries()) {
+    const response = await fetch("https://kapi.kakao.com/v2/api/talk/memo/default/send", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/x-www-form-urlencoded;charset=utf-8",
+      },
+      body: new URLSearchParams({
+        template_object: JSON.stringify({
+          object_type: "text",
+          text: chunk,
+          link: { web_url: SITE_URL, mobile_web_url: SITE_URL },
+        }),
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Kakao ${label} part ${index + 1}/${chunks.length} send failed: ${response.status} ${await response.text()}`);
+    }
+  }
 }
 
 async function sendKakaoTestMemo() {

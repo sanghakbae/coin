@@ -63,13 +63,13 @@ button {
 }
 
 .assetSwitch {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  display: flex;
   gap: 6px;
-  width: min(100%, 520px);
+  width: min(100%, 720px);
 }
 
 .heroPanel .assetSwitch button {
+  flex: 1 1 0;
   width: auto;
   min-width: 0;
   height: 36px;
@@ -445,6 +445,15 @@ h1 {
   text-rendering: optimizeLegibility;
   transform: translateX(4px);
   white-space: nowrap;
+}
+
+.chartMonthAxis .todayLabel {
+  right: 8px;
+  left: auto;
+  display: block;
+  color: #36e7b8;
+  border: 1px solid rgba(54, 231, 184, 0.28);
+  transform: none;
 }
 
 .chartTooltip {
@@ -1109,6 +1118,10 @@ dd small {
 
   .chartMonthAxis.dense span:nth-child(even) {
     display: none;
+  }
+
+  .chartMonthAxis.dense .todayLabel {
+    display: block;
   }
 
   .chartHeader strong {

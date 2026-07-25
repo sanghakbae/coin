@@ -1,4 +1,40 @@
 {
+  "BTC": {
+    "coinId": "bitcoin",
+    "label": "비트코인",
+    "symbol": "BTC",
+    "binanceSymbol": "BTCUSDT",
+    "btcSymbol": null,
+    "newsKeywords": ["bitcoin", "btc", "bitcoin core", "lightning network"],
+    "networkAdapter": "none",
+    "officialNewsUrl": "https://bitcoinops.org/en/newsletters/",
+    "ecosystemCategory": "bitcoin-ecosystem",
+    "coinMarketCapTag": "bitcoin-ecosystem",
+    "ecosystemTitle": "생태계 프로젝트",
+    "repos": [
+      { "owner": "bitcoin", "repo": "bitcoin", "label": "Bitcoin Core", "role": "비트코인 노드 코어", "branch": "master" },
+      { "owner": "bitcoin", "repo": "bips", "label": "Bitcoin BIPs", "role": "개선 제안 명세", "branch": "master" },
+      { "owner": "lightning", "repo": "bolts", "label": "Lightning BOLTs", "role": "라이트닝 명세", "branch": "master" }
+    ]
+  },
+  "ETH": {
+    "coinId": "ethereum",
+    "label": "이더리움",
+    "symbol": "ETH",
+    "binanceSymbol": "ETHUSDT",
+    "btcSymbol": "ETHBTC",
+    "newsKeywords": ["ethereum", "ether", "eth", "vitalik", "eip"],
+    "networkAdapter": "none",
+    "officialNewsUrl": "https://blog.ethereum.org/",
+    "ecosystemCategory": "ethereum-ecosystem",
+    "coinMarketCapTag": "ethereum-ecosystem",
+    "ecosystemTitle": "생태계 프로젝트",
+    "repos": [
+      { "owner": "ethereum", "repo": "go-ethereum", "label": "Geth", "role": "실행 클라이언트", "branch": "master" },
+      { "owner": "ethereum", "repo": "consensus-specs", "label": "Consensus Specs", "role": "합의 계층 명세", "branch": "dev" },
+      { "owner": "ethereum", "repo": "EIPs", "label": "Ethereum EIPs", "role": "개선 제안 명세", "branch": "master" }
+    ]
+  },
   "DOT": {
     "coinId": "polkadot",
     "label": "폴카닷",
@@ -9,6 +45,7 @@
     "networkAdapter": "polkadot",
     "officialNewsUrl": "https://polkadot.com/blog",
     "ecosystemCategory": "dot-ecosystem",
+    "coinMarketCapTag": "polkadot-ecosystem",
     "ecosystemTitle": "생태계 프로젝트",
     "repos": [
       { "owner": "paritytech", "repo": "polkadot-sdk", "label": "Polkadot SDK", "role": "코어 SDK", "branch": "master" },
@@ -26,6 +63,7 @@
     "networkAdapter": "xrpl",
     "officialNewsUrl": "https://xrpl.org/blog/",
     "ecosystemCategory": "xrp-ledger-ecosystem",
+    "coinMarketCapTag": "xrp-ecosystem",
     "ecosystemTitle": "XRPL 생태계 프로젝트",
     "repos": [
       { "owner": "XRPLF", "repo": "rippled", "label": "XRPL Core", "role": "원장 코어 서버", "branch": "develop" },
@@ -43,6 +81,7 @@
     "networkAdapter": "none",
     "officialNewsUrl": "https://chain.link/resources",
     "ecosystemCategory": "oracle",
+    "coinMarketCapTag": "oracles",
     "ecosystemTitle": "오라클 섹터 프로젝트",
     "ecosystemHeading": "오라클 섹터 프로젝트",
     "repos": [
@@ -61,6 +100,7 @@
     "networkAdapter": "avalanche",
     "officialNewsUrl": "https://www.avax.network/blog",
     "ecosystemCategory": "avalanche-ecosystem",
+    "coinMarketCapTag": "avalanche-ecosystem",
     "ecosystemFallbackCategories": ["avalanche-subnet"],
     "ecosystemTitle": "생태계 프로젝트",
     "repos": [
@@ -79,6 +119,7 @@
     "networkAdapter": "none",
     "officialNewsUrl": "https://cosmos.network/blog",
     "ecosystemCategory": "cosmos-ecosystem",
+    "coinMarketCapTag": "cosmos-ecosystem",
     "ecosystemTitle": "생태계 프로젝트",
     "repos": [
       { "owner": "cosmos", "repo": "cosmos-sdk", "label": "Cosmos SDK", "role": "앱체인 SDK", "branch": "main" },
