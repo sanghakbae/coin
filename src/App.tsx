@@ -1016,22 +1016,22 @@ async function fetchCoinMarketCapListings(): Promise<CoinMarketCapListing[]> {
 async function fetchStoredMarketInfo(asset: AssetConfig): Promise<DotMarketInfo | null> {
   const [{ doc, getDoc }, { db }] = await Promise.all([import("firebase/firestore"), import("./firebase")]);
   if (!db) return null;
-  const snapshot = await getDoc(doc(db, "marketSnapshots", asset.symbol));
+  const snapshot = await getDoc(doc(db, "signals", `${asset.binanceSymbol}_1d`));
   if (!snapshot.exists()) return null;
   const data = snapshot.data() as {
-    rank?: number | null;
+    marketCapRank?: number | null;
     marketCap?: number | null;
     circulatingSupply?: number | null;
     totalSupply?: number | null;
-    source?: string;
+    marketDataSource?: string;
   };
-  if (data.rank === null || data.rank === undefined) return null;
+  if (data.marketCapRank === null || data.marketCapRank === undefined) return null;
   return {
-    rank: data.rank,
+    rank: data.marketCapRank,
     marketCap: data.marketCap ?? null,
     circulatingSupply: data.circulatingSupply ?? null,
     totalSupply: data.totalSupply ?? null,
-    source: data.source === "CoinMarketCap" ? "CoinMarketCap" : data.source === "CoinGecko" ? "CoinGecko" : "Firebase",
+    source: data.marketDataSource === "CoinMarketCap" ? "CoinMarketCap" : data.marketDataSource === "CoinGecko" ? "CoinGecko" : "Firebase",
   };
 }
 
@@ -1115,11 +1115,13 @@ async function fetchEcosystemProjects(asset: AssetConfig): Promise<EcosystemProj
 }
 
 async function fetchStoredEcosystemProjects(asset: AssetConfig): Promise<EcosystemProject[]> {
-  const [{ collection, getDocs, limit, orderBy, query }, { db }] = await Promise.all([import("firebase/firestore"), import("./firebase")]);
+  const [{ doc, getDoc }, { db }] = await Promise.all([import("firebase/firestore"), import("./firebase")]);
   if (!db) return [];
-  const snapshot = await getDocs(query(collection(db, "ecosystemProjects", asset.symbol, "projects"), orderBy("marketCap", "desc"), limit(100)));
-  return snapshot.docs.map((document) => {
-    const data = document.data() as {
+  const snapshot = await getDoc(doc(db, "signals", `ecosystem_${asset.symbol}`));
+  if (!snapshot.exists()) return [];
+  const data = snapshot.data() as {
+    projects?: Array<{
+      id?: string;
       name?: string;
       symbol?: string;
       image?: string;
@@ -1127,20 +1129,20 @@ async function fetchStoredEcosystemProjects(asset: AssetConfig): Promise<Ecosyst
       price?: number | null;
       marketCap?: number | null;
       change24h?: number | null;
-      active?: boolean;
-    };
+    }>;
+  };
+  return (data.projects ?? []).map((project) => {
     return {
-      id: document.id,
-      name: data.name ?? document.id,
-      symbol: data.symbol ?? "-",
-      image: data.image ?? "",
-      url: data.sourceUrl ?? `https://www.coingecko.com/en/coins/${document.id}`,
-      price: data.price ?? null,
-      marketCap: data.marketCap ?? null,
-      change24h: data.change24h ?? null,
-      active: data.active ?? true,
+      id: project.id ?? project.symbol ?? "unknown",
+      name: project.name ?? project.symbol ?? "-",
+      symbol: project.symbol ?? "-",
+      image: project.image ?? "",
+      url: project.sourceUrl ?? `https://www.coingecko.com/en/coins/${project.id}`,
+      price: project.price ?? null,
+      marketCap: project.marketCap ?? null,
+      change24h: project.change24h ?? null,
     };
-  }).filter((project) => project.active).slice(0, 20);
+  }).slice(0, 20);
 }
 
 async function fetchNewEcosystemProjects(asset: AssetConfig, currentProjects: EcosystemProject[]): Promise<NewEcosystemProject[]> {

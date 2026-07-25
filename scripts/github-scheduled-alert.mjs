@@ -129,10 +129,13 @@ async function main() {
 
     if (alertType === "signal") {
       await sendKakaoMemo(signal);
+      console.log(`${signal.asset} Kakao ${signal.direction} signal sent.`);
     } else if (alertType === "positive") {
       await sendKakaoMemo(signal, "positive", previous.score);
+      console.log(`${signal.asset} Kakao positive-score alert sent.`);
     } else if (alertType === "pump") {
       await sendKakaoMemo(signal, "pump");
+      console.log(`${signal.asset} Kakao 10-percent alert sent.`);
     }
     await updateCurrentState(db, signal);
   }
@@ -227,6 +230,22 @@ async function syncEcosystemProjects(db) {
         );
       }
       await batch.commit();
+      await db.collection("signals").doc(`ecosystem_${asset.symbol}`).set({
+        asset: asset.symbol,
+        category: asset.ecosystemCategory,
+        projects: rows.slice(0, 100).map((coin) => ({
+          id: coin.id,
+          name: coin.name,
+          symbol: String(coin.symbol).toUpperCase(),
+          image: coin.image || "",
+          source: coin.source || "CoinGecko",
+          sourceUrl: coin.source_url || `https://www.coingecko.com/en/coins/${coin.id}`,
+          price: coin.current_price ?? null,
+          marketCap: coin.market_cap ?? null,
+          change24h: coin.price_change_percentage_24h ?? null,
+        })),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
       console.log(`${asset.symbol} ecosystemProjects=${rows.length}, baseline=${isInitialBaseline}`);
     } catch (error) {
       console.warn(`${asset.symbol} ecosystem snapshot skipped: ${error.message}`);
