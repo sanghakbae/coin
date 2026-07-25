@@ -32,6 +32,15 @@ export function getKoreanDateKey(date = new Date()) {
   return `${values.year}-${values.month}-${values.day}`;
 }
 
+export function isKoreanReportDue(date = new Date()) {
+  const hour = Number(new Intl.DateTimeFormat("en-US", {
+    hour: "2-digit",
+    hourCycle: "h23",
+    timeZone: "Asia/Seoul",
+  }).format(date));
+  return hour >= 22;
+}
+
 export function splitKakaoText(text, maximumLength = 200) {
   const chunks = [];
   let current = "";

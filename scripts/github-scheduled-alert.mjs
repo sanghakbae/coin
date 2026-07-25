@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import { getAlertType } from "./alert-policy.mjs";
-import { formatDailyReportMessage, getKoreanDateKey, splitKakaoText } from "./daily-report-message.mjs";
+import { formatDailyReportMessage, getKoreanDateKey, isKoreanReportDue, splitKakaoText } from "./daily-report-message.mjs";
 import { evaluateDotSignal } from "../src/signal-model.mjs";
 
 const require = createRequire(new URL("../functions/package.json", import.meta.url));
@@ -48,26 +48,33 @@ main().catch((error) => {
 async function main() {
   const dryRun = process.env.DRY_RUN === "true";
   const dailyReport = process.env.DAILY_REPORT === "true";
+  const dailyReportIfDue = process.env.DAILY_REPORT_IF_DUE === "true" && isKoreanReportDue();
   const ecosystemOnly = process.env.ECOSYSTEM_ONLY === "true";
-
-  if (process.env.KAKAO_TEST_MESSAGE === "true") {
-    assertEnv("KAKAO_REST_API_KEY");
-    assertEnv("KAKAO_REFRESH_TOKEN");
-    await sendKakaoTestMemo();
-    console.log("Kakao test message sent successfully.");
-    return;
-  }
+  const reauthorizeKakao = process.env.KAKAO_REAUTHORIZE === "true";
 
   let db = null;
   if (!dryRun) {
     if (!ecosystemOnly) {
       assertEnv("KAKAO_REST_API_KEY");
-      assertEnv("KAKAO_REFRESH_TOKEN");
     }
     assertEnv("FIREBASE_SERVICE_ACCOUNT_COIN_F1318");
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_COIN_F1318);
     if (!getApps().length) initializeApp({ credential: cert(serviceAccount) });
     db = getFirestore();
+  }
+  if (reauthorizeKakao) {
+    assertEnv("KAKAO_AUTHORIZATION_CODE");
+    if (!db) throw new Error("Kakao reauthorization requires Firebase credentials.");
+    await exchangeKakaoAuthorizationCode(db);
+    await sendKakaoTestMemo(db);
+    console.log("Kakao reauthorization and test message completed successfully.");
+    return;
+  }
+  if (process.env.KAKAO_TEST_MESSAGE === "true") {
+    if (!db) throw new Error("Kakao test requires Firebase credentials.");
+    await sendKakaoTestMemo(db);
+    console.log("Kakao test message sent successfully.");
+    return;
   }
   if (ecosystemOnly) {
     if (!db) throw new Error("Ecosystem sync requires Firebase credentials.");
@@ -118,9 +125,9 @@ async function main() {
 
   await saveSignals(db, signals);
 
-  if (dailyReport) {
+  if (dailyReport || dailyReportIfDue) {
     await sendDailyReportOnce(db, signals);
-    return;
+    if (dailyReport) return;
   }
 
   for (const signal of signals) {
@@ -128,13 +135,13 @@ async function main() {
     const alertType = getAlertType(previous, signal);
 
     if (alertType === "signal") {
-      await sendKakaoMemo(signal);
+      await sendKakaoMemo(db, signal);
       console.log(`${signal.asset} Kakao ${signal.direction} signal sent.`);
     } else if (alertType === "positive") {
-      await sendKakaoMemo(signal, "positive", previous.score);
+      await sendKakaoMemo(db, signal, "positive", previous.score);
       console.log(`${signal.asset} Kakao positive-score alert sent.`);
     } else if (alertType === "pump") {
-      await sendKakaoMemo(signal, "pump");
+      await sendKakaoMemo(db, signal, "pump");
       console.log(`${signal.asset} Kakao 10-percent alert sent.`);
     }
     await updateCurrentState(db, signal);
@@ -886,7 +893,7 @@ async function sendDailyReportOnce(db, signals) {
   }
 
   try {
-    await sendKakaoText(formatDailyReportMessage(signals), "daily report");
+    await sendKakaoText(db, formatDailyReportMessage(signals), "daily report");
     await reportRef.set({
       status: "sent",
       sentAt: FieldValue.serverTimestamp(),
@@ -898,7 +905,7 @@ async function sendDailyReportOnce(db, signals) {
   }
 }
 
-async function sendKakaoMemo(signal, alertType = "signal", previousScore = null) {
+async function sendKakaoMemo(db, signal, alertType = "signal", previousScore = null) {
   const asset = signal.symbol.endsWith("USDT") ? signal.symbol.slice(0, -4) : signal.symbol;
   const label = alertType === "positive" ? "종합점수 플러스 전환" : alertType === "pump" ? "10% 이상 상승" : signal.direction === "buy" ? "매수 신호" : "매도 신호";
   const detail = alertType === "positive"
@@ -914,11 +921,11 @@ async function sendKakaoMemo(signal, alertType = "signal", previousScore = null)
 개발 지수: ${signal.developmentIndex}/100
 ${detail}`;
 
-  await sendKakaoText(message, "alert");
+  await sendKakaoText(db, message, "alert");
 }
 
-async function sendKakaoText(message, label) {
-  const accessToken = await refreshKakaoAccessToken();
+async function sendKakaoText(db, message, label) {
+  const accessToken = await refreshKakaoAccessToken(db);
   const chunks = splitKakaoText(message);
   for (const [index, chunk] of chunks.entries()) {
     const response = await fetch("https://kapi.kakao.com/v2/api/talk/memo/default/send", {
@@ -942,8 +949,8 @@ async function sendKakaoText(message, label) {
   }
 }
 
-async function sendKakaoTestMemo() {
-  const accessToken = await refreshKakaoAccessToken();
+async function sendKakaoTestMemo(db) {
+  const accessToken = await refreshKakaoAccessToken(db);
   const sentAt = new Intl.DateTimeFormat("ko-KR", {
     dateStyle: "medium",
     timeStyle: "medium",
@@ -966,11 +973,32 @@ async function sendKakaoTestMemo() {
   if (!response.ok) throw new Error(`Kakao test send failed: ${response.status} ${await response.text()}`);
 }
 
-async function refreshKakaoAccessToken() {
+async function exchangeKakaoAuthorizationCode(db) {
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    client_id: process.env.KAKAO_REST_API_KEY,
+    redirect_uri: process.env.KAKAO_REDIRECT_URI || `${SITE_URL}/kakao/callback`,
+    code: process.env.KAKAO_AUTHORIZATION_CODE,
+  });
+  if (process.env.KAKAO_CLIENT_SECRET) body.set("client_secret", process.env.KAKAO_CLIENT_SECRET);
+
+  const response = await fetch("https://kauth.kakao.com/oauth/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded;charset=utf-8" },
+    body,
+  });
+  if (!response.ok) throw new Error(`Kakao authorization failed: ${response.status} ${await response.text()}`);
+  const data = await response.json();
+  if (!data.refresh_token) throw new Error("Kakao authorization response did not include a refresh token.");
+  await saveKakaoRefreshToken(db, data.refresh_token, "authorization_code");
+}
+
+async function refreshKakaoAccessToken(db) {
+  const refreshToken = await readKakaoRefreshToken(db);
   const body = new URLSearchParams({
     grant_type: "refresh_token",
     client_id: process.env.KAKAO_REST_API_KEY,
-    refresh_token: process.env.KAKAO_REFRESH_TOKEN,
+    refresh_token: refreshToken,
   });
   if (process.env.KAKAO_CLIENT_SECRET) body.set("client_secret", process.env.KAKAO_CLIENT_SECRET);
 
@@ -981,7 +1009,24 @@ async function refreshKakaoAccessToken() {
   });
   if (!response.ok) throw new Error(`Kakao token failed: ${response.status} ${await response.text()}`);
   const data = await response.json();
+  if (data.refresh_token) await saveKakaoRefreshToken(db, data.refresh_token, "refresh");
   return data.access_token;
+}
+
+async function readKakaoRefreshToken(db) {
+  const snapshot = await db.collection("privateConfig").doc("kakao").get();
+  const storedToken = snapshot.exists ? snapshot.data()?.refreshToken : null;
+  const refreshToken = typeof storedToken === "string" && storedToken ? storedToken : process.env.KAKAO_REFRESH_TOKEN;
+  if (!refreshToken) throw new Error("Missing Kakao refresh token in Firebase and GitHub Secrets.");
+  return refreshToken;
+}
+
+async function saveKakaoRefreshToken(db, refreshToken, source) {
+  await db.collection("privateConfig").doc("kakao").set({
+    refreshToken,
+    source,
+    updatedAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
 }
 
 function calculateRsi(closes, period = 14) {

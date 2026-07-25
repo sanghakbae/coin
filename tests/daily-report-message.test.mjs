@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatDailyReportMessage, getKoreanDateKey, splitKakaoText } from "../scripts/daily-report-message.mjs";
+import { formatDailyReportMessage, getKoreanDateKey, isKoreanReportDue, splitKakaoText } from "../scripts/daily-report-message.mjs";
 
 test("formats all asset decisions into a compact Korean daily report", () => {
   const message = formatDailyReportMessage([
@@ -17,6 +17,11 @@ test("formats all asset decisions into a compact Korean daily report", () => {
 
 test("builds the report date key in Asia/Seoul", () => {
   assert.equal(getKoreanDateKey(new Date("2026-07-25T15:30:00Z")), "2026-07-26");
+});
+
+test("detects the daily report window in Asia/Seoul", () => {
+  assert.equal(isKoreanReportDue(new Date("2026-07-25T12:59:00Z")), false);
+  assert.equal(isKoreanReportDue(new Date("2026-07-25T13:00:00Z")), true);
 });
 
 test("splits a seven-asset report within Kakao's 200 character limit", () => {

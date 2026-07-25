@@ -10,6 +10,11 @@ on:
         required: false
         default: false
         type: boolean
+      reauthorize_kakao:
+        description: "임시 인증 코드로 카카오 토큰을 재발급하고 테스트"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -26,8 +31,12 @@ jobs:
       KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
       KAKAO_CLIENT_SECRET: ${{ secrets.KAKAO_CLIENT_SECRET }}
       KAKAO_REFRESH_TOKEN: ${{ secrets.KAKAO_REFRESH_TOKEN }}
+      KAKAO_AUTHORIZATION_CODE: ${{ secrets.KAKAO_AUTHORIZATION_CODE }}
       SITE_URL: https://dot.sanghak.kr
       KAKAO_TEST_MESSAGE: ${{ inputs.test_kakao || 'false' }}
+      KAKAO_REAUTHORIZE: ${{ inputs.reauthorize_kakao || 'false' }}
+      KAKAO_REDIRECT_URI: https://dot.sanghak.kr/kakao/callback
+      DAILY_REPORT_IF_DUE: "true"
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
@@ -45,9 +54,9 @@ jobs:
       - name: Check alert secrets
         run: |
           missing=0
-          required_keys="KAKAO_REST_API_KEY KAKAO_REFRESH_TOKEN"
-          if [ "$KAKAO_TEST_MESSAGE" != "true" ]; then
-            required_keys="FIREBASE_SERVICE_ACCOUNT_COIN_F1318 $required_keys"
+          required_keys="FIREBASE_SERVICE_ACCOUNT_COIN_F1318 KAKAO_REST_API_KEY KAKAO_REFRESH_TOKEN"
+          if [ "$KAKAO_REAUTHORIZE" = "true" ]; then
+            required_keys="$required_keys KAKAO_AUTHORIZATION_CODE"
           fi
           for key in $required_keys; do
             if [ -z "${!key}" ]; then
