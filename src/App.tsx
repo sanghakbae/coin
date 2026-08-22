@@ -1500,13 +1500,28 @@ function DotChart({
   const dailySma20wSeries = candles
     .map((candle, index) => ({ time: candle.openTime, value: dailySma20wAverages[index] }))
     .filter((point): point is { time: number; value: number } => point.value !== null);
-  // 전체 구간은 일봉 365개로 커버되지 않으므로 주봉 20개 평균으로 대신 그린다.
-  const sma20wPoints = sampleSeries(granularity === "weekly" ? toSeries(weeklySma20) : dailySma20wSeries, times);
+  // 일봉 365개로는 앞쪽 140일치 평균이 나오지 않으므로, 일봉 시계열이 시작되기
+  // 전 구간은 주봉 20개 평균으로 이어 붙여 선이 끊기지 않게 한다.
+  const dailySma20wStart = dailySma20wSeries[0]?.time ?? Number.POSITIVE_INFINITY;
+  const sma20wSeries = [
+    ...toSeries(weeklySma20).filter((point) => point.time < dailySma20wStart),
+    ...dailySma20wSeries,
+  ];
+  const sma20wPoints = sampleSeries(sma20wSeries, times);
   const sma200wPoints = sampleSeries(toSeries(weeklySma200), times);
   // 지표 카드와 같은 정의(일봉 140개 평균)를 표기해 두 값이 어긋나지 않게 한다.
   const sma20wLatest = dailySma20wSeries[dailySma20wSeries.length - 1]?.value ?? sma20wPoints[sma20wPoints.length - 1] ?? null;
   const sma200wLatest = sma200wPoints[sma200wPoints.length - 1] ?? null;
   const withinScale = (value: number | null) => value !== null && min !== null && max !== null && value >= min && value <= max;
+  // 이동평균은 기간만큼 데이터가 쌓인 뒤부터 존재한다. 왼쪽이 빈 게 렌더링
+  // 누락처럼 보이지 않도록 시작 시점을 범례에 적는다.
+  const seriesStartLabel = (points: Array<number | null>) => {
+    const firstKnown = points.findIndex((value) => value !== null);
+    if (firstKnown <= 0) return "";
+    const startedAt = times[firstKnown];
+    if (startedAt === undefined) return "";
+    return ` · ${new Intl.DateTimeFormat("ko-KR", { year: "numeric", month: "long" }).format(new Date(startedAt))}부터`;
+  };
 
   const change = first && last ? ((last - first) / first) * 100 : null;
   const stroke = change !== null && change >= 0 ? "#36e7b8" : "#ff746b";
@@ -1536,12 +1551,14 @@ function DotChart({
         <span className="legendSma20">
           20주선 {formatUsdt(sma20wLatest)}
           {sma20wLatest !== null && !withinScale(sma20wLatest) ? " · 차트 범위 밖" : ""}
+          {seriesStartLabel(sma20wPoints)}
         </span>
         <span className="legendSma200">
           200주선 {formatUsdt(sma200wLatest)}
           {sma200wLatest === null
             ? " · 주봉 200주 미달"
             : withinScale(sma200wLatest) ? "" : " · 차트 범위 밖"}
+          {seriesStartLabel(sma200wPoints)}
         </span>
       </div>
       <div className="chartCanvas">
