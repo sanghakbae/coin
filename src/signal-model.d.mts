@@ -34,6 +34,7 @@ export interface DotSignalResult {
   confidence: number;
   coverage: { available: number; total: number };
   direction: SignalDirection;
+  reasonDetails: Array<{ key: string; text: string }>;
   reasons: string[];
   riskLevel: "low" | "medium" | "high" | "unknown";
   score: number;

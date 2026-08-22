@@ -34,13 +34,19 @@ export function developmentContribution(index) {
 export function evaluateDotSignal(input) {
   const assetSymbol = input.assetSymbol || "DOT";
   const reasons = [];
+  // Same texts as `reasons`, tagged with the component they came from so a UI
+  // can look up an explanation for each one.
+  const reasonDetails = [];
   const components = {};
   const covered = [];
   let positiveMax = 0;
   let negativeMax = 0;
   const add = (key, value, reason, available = true) => {
     components[key] = Math.round(value);
-    if (value !== 0 && reason) reasons.push(reason);
+    if (value !== 0 && reason) {
+      reasons.push(reason);
+      reasonDetails.push({ key, text: reason });
+    }
     if (!available) return;
     const [positiveLimit, negativeLimit] = COMPONENT_LIMITS[key];
     covered.push(key);
@@ -137,9 +143,13 @@ export function evaluateDotSignal(input) {
   confidence = Math.round(clamp(confidence, 20, 95));
   const riskLevel = input.atrPercent == null ? "unknown" : input.atrPercent >= 8 ? "high" : input.atrPercent >= 4 ? "medium" : "low";
 
-  if (input.adx != null && input.adx < 20) reasons.push(`ADX ${input.adx.toFixed(1)}: 횡보 가능성으로 신호 신뢰도 낮춤`);
-  if (input.atrPercent != null && input.atrPercent >= 8) reasons.push(`ATR ${input.atrPercent.toFixed(1)}%: 변동성 위험 높음`);
-  if (!reasons.length) reasons.push("뚜렷한 방향 우위가 없습니다.");
+  const note = (key, text) => {
+    reasons.push(text);
+    reasonDetails.push({ key, text });
+  };
+  if (input.adx != null && input.adx < 20) note("adx", `ADX ${input.adx.toFixed(1)}: 횡보 가능성으로 신호 신뢰도 낮춤`);
+  if (input.atrPercent != null && input.atrPercent >= 8) note("atr", `ATR ${input.atrPercent.toFixed(1)}%: 변동성 위험 높음`);
+  if (!reasons.length) note("none", "뚜렷한 방향 우위가 없습니다.");
 
-  return { components, confidence, coverage, direction, reasons, riskLevel, score, scoreRange, strength };
+  return { components, confidence, coverage, direction, reasonDetails, reasons, riskLevel, score, scoreRange, strength };
 }

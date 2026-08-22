@@ -140,3 +140,18 @@ test("strength stays within bounds when every component is at its extreme", () =
   assert.equal(maxed.coverage.available, 16);
   assert.equal(maxed.strength, 100);
 });
+
+test("tags every reason with the component it came from", () => {
+  const result = evaluateDotSignal({
+    ...neutralInput,
+    above20w: false,
+    adx: 15,
+    btcRegime: -1,
+    trendState: -1,
+  });
+  assert.deepEqual(result.reasons, result.reasonDetails.map((detail) => detail.text));
+  assert.deepEqual(result.reasonDetails.map((detail) => detail.key), ["trend", "sma20w", "btcRegime", "adx"]);
+
+  const quiet = evaluateDotSignal(neutralInput);
+  assert.deepEqual(quiet.reasonDetails, [{ key: "none", text: "뚜렷한 방향 우위가 없습니다." }]);
+});

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Activity, ArrowDownRight, ArrowUpRight, Code2, Coins, ExternalLink, Landmark, Network, Newspaper, RefreshCw, ShieldCheck, TrendingUp } from "lucide-react";
+import { Activity, ArrowDownRight, ArrowUpRight, Code2, Coins, ExternalLink, Landmark, Network, Newspaper, RefreshCw, ShieldCheck, TrendingUp, X } from "lucide-react";
 import xxhash from "xxhash-wasm";
 import assetsJson from "./assets.json";
 import { mergeLiveTodayCandle } from "./chart-data.mjs";
@@ -83,6 +83,7 @@ interface DotSignal {
   confidence: number;
   riskLevel: "low" | "medium" | "high" | "unknown";
   components: Record<string, number>;
+  reasonDetails: Array<{ key: string; text: string }>;
   reasons: string[];
 }
 
@@ -412,6 +413,40 @@ function sliceCandlesByRange<T extends { openTime: number }>(candles: T[], range
   const from = now - days * 86_400_000;
   const windowed = candles.filter((candle) => candle.openTime >= from);
   return windowed.length >= 2 ? windowed : candles.slice(-2);
+}
+
+// Averages the window once it is full, and everything available before that,
+// so a line can start at the first candle instead of `period` candles in.
+// Points from the短 window are flagged so they can be drawn as an estimate.
+function expandingSma(values: number[], period: number) {
+  let sum = 0;
+  return values.map((value, index) => {
+    sum += value;
+    if (index >= period) sum -= values[index - period];
+    return { value: sum / Math.min(index + 1, period), partial: index < period - 1 };
+  });
+}
+
+function sampleFlaggedSeries(series: Array<{ time: number; value: number; partial: boolean }>, targets: number[]) {
+  let cursor = 0;
+  let held: { value: number; partial: boolean } | null = null;
+  return targets.map((target) => {
+    while (cursor < series.length && series[cursor].time <= target) {
+      held = series[cursor];
+      cursor += 1;
+    }
+    return held;
+  });
+}
+
+// Splits a sampled series into the settled part and the short-window part,
+// repeating the first settled point so the two subpaths meet.
+function splitSettled(points: Array<{ value: number; partial: boolean } | null>) {
+  const settled = points.map((point) => (point && !point.partial ? point.value : null));
+  const partial = points.map((point) => (point && point.partial ? point.value : null));
+  const firstSettled = settled.findIndex((value) => value !== null);
+  if (firstSettled > 0 && partial[firstSettled - 1] !== null) partial[firstSettled] = settled[firstSettled];
+  return { settled, partial };
 }
 
 function rollingSma(values: number[], period: number) {
@@ -1440,6 +1475,236 @@ async function fetchStoredOnchainInfo(): Promise<OnchainInfo | null> {
   };
 }
 
+interface MetricGuide {
+  title: string;
+  what: string;
+  how: string;
+  read: string;
+}
+
+// 카드·판단 이유를 눌렀을 때 띄우는 설명. 점수 배점은 signal-model.mjs와 같은 값이다.
+const METRIC_GUIDES: Record<string, MetricGuide> = {
+  strength: {
+    title: "신호 강도",
+    what: "16개 지표 점수를 합산한 뒤, 그 시점에 데이터가 있던 지표들의 최대 배점 합으로 나눈 값입니다. -100에서 +100 사이입니다.",
+    how: "원점수 ÷ (데이터가 있는 지표의 최대 배점 합) × 100. 카드에 함께 표시되는 '지표 12/16'이 그 분모에 들어간 지표 수입니다.",
+    read: "매수·매도 판정은 강도가 아니라 원점수 ±35로 결정합니다. 지표 수가 적을 때는 강도가 쉽게 커지므로 항상 지표 수와 함께 보세요.",
+  },
+  price: {
+    title: "현재가",
+    what: "Binance 현물 시장의 최종 체결가입니다. USDT 기준이며 원화는 참고용 환산입니다.",
+    how: "원화 = 현재가 × 원달러 환율. 환율은 공개 환율 API에서 가져오고 카드 아래에 적용값을 표시합니다.",
+    read: "국내 거래소 시세와 차이가 나면 김치 프리미엄 카드에서 그 차이를 확인할 수 있습니다.",
+  },
+  dayChange: {
+    title: "24시간 변화",
+    what: "Binance 24시간 티커의 가격 변화율입니다.",
+    how: "24시간 전 대비 변화율. +10% 이상이면 +6점, -8% 이하면 -6점을 종합 점수에 반영합니다.",
+    read: "급등·급락 자체는 방향을 정해주지 않습니다. 거래량·추세 지표와 같이 봐야 의미가 생깁니다.",
+  },
+  kimchi: {
+    title: "김치 프리미엄",
+    what: "국내(업비트) 원화 시세가 해외(Binance) 시세보다 얼마나 비싼지를 나타냅니다.",
+    how: "(업비트 원화가 ÷ (Binance USDT가 × 원달러 환율) - 1) × 100. 업비트의 KRW-USDT 시세가 아니라 원달러 환율로 환산합니다.",
+    read: "플러스면 국내 매수 수요가 강하다는 뜻이고, 과열 국면에서 커지는 경향이 있습니다. 종합 점수에는 반영하지 않습니다.",
+  },
+  rsi: {
+    title: "RSI",
+    what: "최근 상승폭과 하락폭의 비율로 과매수·과매도를 재는 14일 지표입니다.",
+    how: "14일 RSI. 30 이하면 +18점, 70 이상이면 -18점으로 종합 점수에서 가장 큰 배점입니다.",
+    read: "추세가 강한 구간에서는 70 위에 오래 머물 수 있습니다. 과열이 곧 하락은 아니며, 추세 배열과 함께 판단하세요.",
+  },
+  sma20w: {
+    title: "20주 평균선",
+    what: "약 5개월 평균가로, 중기 강세·약세를 가르는 기준선으로 널리 쓰입니다.",
+    how: "일봉 종가 140개의 단순 평균. 현재가가 위면 +10점, 아래면 -10점입니다.",
+    read: "현재가가 이 선 위에 있으면 중기 상승 흐름, 아래면 하락 흐름으로 봅니다. 차트의 파란 실선입니다.",
+  },
+  sma200w: {
+    title: "200주 평균선",
+    what: "약 4년 평균가로, 사이클 저점 지지선으로 보는 장기선입니다.",
+    how: "주봉 종가 200개의 단순 평균. 표시 전용이며 종합 점수에는 반영하지 않습니다.",
+    read: "현재가가 이 선 아래면 역사적으로 장기 침체 구간이었습니다. 차트의 주황 점선이며, 상장 후 200주가 안 된 구간은 누적 평균으로 흐리게 그립니다.",
+  },
+  marketCap: {
+    title: "시가총액 순위",
+    what: "스테이블 코인을 제외한 전체 시가총액 순위입니다.",
+    how: "공개 시세 API의 시가총액 순위에서 스테이블 코인을 걸러낸 순위입니다.",
+    read: "순위가 낮을수록 유동성과 상장 폭이 넓습니다. 종합 점수에는 반영하지 않습니다.",
+  },
+  quoteVolume: {
+    title: "24시간 거래대금",
+    what: "Binance 해당 마켓에서 24시간 동안 체결된 금액입니다.",
+    how: "24시간 티커의 quoteVolume(USDT 기준)입니다.",
+    read: "거래대금이 평소보다 크게 늘면 가격 움직임의 신뢰도가 올라갑니다. 거래량 배수는 판단 이유에서 따로 확인할 수 있습니다.",
+  },
+  periodChange: {
+    title: "7일 / 30일 변화",
+    what: "일봉 종가 기준 중기 수익률입니다.",
+    how: "7일·30일 전 종가 대비 변화율. 7일 변화가 +8%를 넘으면 +5점, -8% 아래면 -5점입니다.",
+    read: "24시간 변화와 방향이 엇갈리면 단기 반등 또는 단기 조정 국면일 수 있습니다.",
+  },
+  development: {
+    title: "개발 지수",
+    what: "공식 GitHub 저장소의 개발 활동을 100점으로 환산한 값입니다.",
+    how: "최근 커밋 시점(40점) + 활성 저장소 비중(25점) + 30일 커밋 빈도(20점) + 최근 릴리스(15점). 80점 이상 +10점, 20점 미만 -10점입니다.",
+    read: "가격과 무관하게 프로젝트가 살아 있는지를 봅니다. 데이터를 못 받은 경우 0점이 아니라 점수 반영에서 제외합니다.",
+  },
+  btcRegime: {
+    title: "BTC 시장 환경",
+    what: "비트코인이 장기 상승 국면인지로 시장 전체 환경을 판단합니다.",
+    how: "BTC 현재가가 200일 EMA 위면 우호(+10점), 아래면 방어(-10점)입니다.",
+    read: "알트코인은 BTC 환경에 크게 좌우됩니다. 방어 국면에서는 개별 호재가 잘 먹히지 않습니다.",
+  },
+  assetBtc: {
+    title: "BTC 상대 강도",
+    what: "해당 자산이 최근 비트코인보다 강했는지 약했는지 봅니다.",
+    how: "자산/BTC 마켓의 7일 변화율. +5% 이상이면 +6점, -5% 이하면 -6점입니다.",
+    read: "원화·달러 기준으로 올랐어도 BTC보다 약하면 자금이 BTC로 쏠리는 국면입니다.",
+  },
+  confidence: {
+    title: "신호 신뢰도",
+    what: "판단을 얼마나 믿을 수 있는지를 나타냅니다. 방향이 아니라 확실성의 지표입니다.",
+    how: "48 + |원점수| × 0.45(최대 25)에서 시작해 ADX 25 이상 +12, 20 미만 -8, ATR 8% 이상 -8, 개발 데이터 없음 -8. 20~95로 제한합니다.",
+    read: "신뢰도가 낮으면 강도가 크더라도 횡보나 잡음일 수 있습니다.",
+  },
+  risk: {
+    title: "변동 위험",
+    what: "가격이 하루에 얼마나 크게 흔들리는지를 나타냅니다.",
+    how: "ATR(14일 실제 변동폭) ÷ 현재가. 8% 이상 높음, 4% 이상 보통, 그 아래 낮음입니다.",
+    read: "위험이 높으면 같은 판단이라도 손절 폭을 넓게 잡아야 하고, 신뢰도도 8점 깎입니다.",
+  },
+  trend: {
+    title: "추세 배열",
+    what: "현재가와 두 이동평균선의 순서로 장기 추세를 판단합니다.",
+    how: "현재가 > 50일 EMA > 200일 EMA면 상승 배열(+18점), 반대로 정렬되면 하락 배열(-18점), 섞이면 0점입니다.",
+    read: "RSI와 같은 최대 배점입니다. 배열이 잡히면 단기 과열만으로 방향을 뒤집지 않는 편이 안전합니다.",
+  },
+  macd: {
+    title: "MACD",
+    what: "단기·장기 이동평균의 간격 변화로 추세의 힘을 봅니다.",
+    how: "12일·26일 EMA 차이와 9일 시그널선의 차(히스토그램). 양수면 +8점, 음수면 -8점입니다.",
+    read: "값의 크기보다 부호가 바뀌는 시점이 중요합니다.",
+  },
+  volume: {
+    title: "거래량",
+    what: "최근 거래량이 평소보다 얼마나 늘었는지 봅니다.",
+    how: "직전 20일 평균 대비 1.5배 이상일 때만 반영하며, 가격이 오르면 +8점, 내리면 -8점입니다.",
+    read: "거래량이 실린 방향이 실린 쪽으로 이어질 가능성이 큽니다. 1.5배 미만이면 점수 0점입니다.",
+  },
+  news: {
+    title: "뉴스 재료",
+    what: "최근 관련 뉴스의 긍정·부정 균형입니다.",
+    how: "기사별 감정 점수 합계. 합계가 +2 이상이거나 -2 이하일 때만 반영하고 최대 ±10점입니다.",
+    read: "제목 기반 판단이라 뉘앙스를 놓칠 수 있습니다. 기사가 없으면 0점이 아니라 점수 반영에서 제외합니다.",
+  },
+  network: {
+    title: "네트워크 상태",
+    what: "체인이 정상적으로 블록을 만들고 확정하는지 봅니다.",
+    how: "동기화 상태와 최신·확정 블록 간격을 확인해 정상이면 +2점, 지연이면 -8점입니다.",
+    read: "정상은 당연한 상태라 가점이 작고, 이상은 크게 감점하는 비대칭 배점입니다.",
+  },
+  derivatives: {
+    title: "선물 수급",
+    what: "선물 시장의 포지션 쏠림과 비용을 봅니다.",
+    how: "미결제약정 24시간 ±5% 이상(±4점 또는 -2점), 펀딩비 +0.05% 이상 -4점 / -0.05% 이하 +2점, 롱숏 비율 2 이상 -3점 / 0.7 이하 +2점. 합산 후 -10~+10으로 제한합니다.",
+    read: "한쪽으로 과하게 쏠리면 청산으로 되돌림이 나오기 쉬워 감점 방향으로 작용합니다.",
+  },
+  breakout: {
+    title: "볼린저 돌파",
+    what: "가격이 통계적 변동 범위를 벗어났는지 봅니다.",
+    how: "20일 볼린저 밴드 상단·하단 이탈에 거래량 1.2배 이상이 겹칠 때만 ±4점입니다.",
+    read: "거래량 없는 돌파는 되돌림이 잦아 점수에 넣지 않습니다.",
+  },
+  staking: {
+    title: "스테이킹·검증인",
+    what: "네트워크 보안에 참여한 물량과 검증인 규모입니다.",
+    how: "스테이킹 비율 45~70% +2점 / 30% 미만 -3점, 검증인 500 이상 +2점 / 300 미만 -2점. 합산 후 ±4점으로 제한합니다.",
+    read: "묶인 물량이 많으면 유통량이 줄지만, 너무 높으면 유동성이 부족한 신호로도 봅니다.",
+  },
+  etf: {
+    title: "ETF 수급",
+    what: "상장 ETF를 통한 기관 자금 흐름입니다.",
+    how: "5일 발행주식 수 변화 ±6점, 거래량 평균 2배 이상일 때 ±2점, 프리미엄/할인 ±1% 기준 ±1점. 합산 후 ±8점으로 제한합니다.",
+    read: "발행주식 수가 늘면 신규 자금 유입, 줄면 환매입니다. 가격보다 자금 방향을 먼저 봅니다.",
+  },
+  adx: {
+    title: "ADX (추세 강도)",
+    what: "추세가 방향을 갖고 있는지, 횡보인지를 재는 지표입니다.",
+    how: "14일 ADX. 25 이상이면 신뢰도 +12점, 20 미만이면 -8점입니다. 방향 점수에는 넣지 않습니다.",
+    read: "20 미만이면 어떤 방향 신호든 잡음일 확률이 올라갑니다.",
+  },
+  atr: {
+    title: "ATR (변동성)",
+    what: "하루 평균 실제 변동폭입니다.",
+    how: "14일 ATR을 현재가로 나눈 비율. 8% 이상이면 신뢰도에서 8점을 뺍니다.",
+    read: "변동성이 크면 같은 신호라도 손실 구간이 깊어질 수 있습니다.",
+  },
+  none: {
+    title: "방향 우위 없음",
+    what: "어느 지표도 뚜렷한 방향을 내지 않아 근거로 적을 내용이 없는 상태입니다.",
+    how: "모든 지표가 중립 구간이거나 데이터가 아직 안 모인 경우입니다.",
+    read: "관망 구간입니다. 점수와 신뢰도를 같이 확인하세요.",
+  },
+};
+
+// 판단 이유의 컴포넌트 키와 카드 키 이름이 다른 경우를 이어 준다.
+const GUIDE_ALIASES: Record<string, string> = {
+  weekChange: "periodChange",
+  dotBtc: "assetBtc",
+};
+
+function guideFor(key: string) {
+  return METRIC_GUIDES[GUIDE_ALIASES[key] ?? key];
+}
+
+function MetricGuideModal({ guideKey, onClose }: { guideKey: string; onClose: () => void }) {
+  const guide = guideFor(guideKey);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  if (!guide) return null;
+
+  return (
+    <div className="guideBackdrop" role="presentation" onClick={onClose}>
+      <div
+        className="guideModal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${guide.title} 설명`}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="guideHeader">
+          <strong>{guide.title}</strong>
+          <button type="button" aria-label="설명 닫기" onClick={onClose}>
+            <X size={16} />
+          </button>
+        </div>
+        <dl>
+          <div>
+            <dt>무엇인가</dt>
+            <dd>{guide.what}</dd>
+          </div>
+          <div>
+            <dt>계산 방법</dt>
+            <dd>{guide.how}</dd>
+          </div>
+          <div>
+            <dt>읽는 법</dt>
+            <dd>{guide.read}</dd>
+          </div>
+        </dl>
+      </div>
+    </div>
+  );
+}
+
 function DotChart({
   asset,
   candles,
@@ -1491,36 +1756,34 @@ function DotChart({
   // 주봉 종가로 20주·200주 이동평균 시계열을 만들고, 20주선은 일봉 구간에서
   // 일 단위로 다시 계산해 계단이 아닌 곡선으로 보이게 한다.
   const weeklyCloses = weeklyCandles.map((candle) => candle.close);
-  const weeklySma20 = rollingSma(weeklyCloses, 20);
-  const weeklySma200 = rollingSma(weeklyCloses, 200);
-  const toSeries = (averages: Array<number | null>) => weeklyCandles
-    .map((candle, index) => ({ time: candle.openTime, value: averages[index] }))
-    .filter((point): point is { time: number; value: number } => point.value !== null);
+  const weeklySeries = (period: number) => expandingSma(weeklyCloses, period)
+    .map((point, index) => ({ time: weeklyCandles[index].openTime, ...point }));
   const dailySma20wAverages = rollingSma(candles.map((candle) => candle.close), 140);
   const dailySma20wSeries = candles
-    .map((candle, index) => ({ time: candle.openTime, value: dailySma20wAverages[index] }))
-    .filter((point): point is { time: number; value: number } => point.value !== null);
+    .map((candle, index) => ({ time: candle.openTime, value: dailySma20wAverages[index], partial: false }))
+    .filter((point): point is { time: number; value: number; partial: boolean } => point.value !== null);
   // 일봉 365개로는 앞쪽 140일치 평균이 나오지 않으므로, 일봉 시계열이 시작되기
   // 전 구간은 주봉 20개 평균으로 이어 붙여 선이 끊기지 않게 한다.
   const dailySma20wStart = dailySma20wSeries[0]?.time ?? Number.POSITIVE_INFINITY;
-  const sma20wSeries = [
-    ...toSeries(weeklySma20).filter((point) => point.time < dailySma20wStart),
+  const sma20w = splitSettled(sampleFlaggedSeries([
+    ...weeklySeries(20).filter((point) => point.time < dailySma20wStart),
     ...dailySma20wSeries,
-  ];
-  const sma20wPoints = sampleSeries(sma20wSeries, times);
-  const sma200wPoints = sampleSeries(toSeries(weeklySma200), times);
+  ], times));
+  const sma200w = splitSettled(sampleFlaggedSeries(weeklySeries(200), times));
+  const lastValue = (values: Array<number | null>) => values[values.length - 1] ?? null;
   // 지표 카드와 같은 정의(일봉 140개 평균)를 표기해 두 값이 어긋나지 않게 한다.
-  const sma20wLatest = dailySma20wSeries[dailySma20wSeries.length - 1]?.value ?? sma20wPoints[sma20wPoints.length - 1] ?? null;
-  const sma200wLatest = sma200wPoints[sma200wPoints.length - 1] ?? null;
+  const sma20wLatest = dailySma20wSeries[dailySma20wSeries.length - 1]?.value ?? lastValue(sma20w.settled) ?? lastValue(sma20w.partial);
+  const sma200wLatest = lastValue(sma200w.settled) ?? lastValue(sma200w.partial);
   const withinScale = (value: number | null) => value !== null && min !== null && max !== null && value >= min && value <= max;
   // 이동평균은 기간만큼 데이터가 쌓인 뒤부터 존재한다. 왼쪽이 빈 게 렌더링
   // 누락처럼 보이지 않도록 시작 시점을 범례에 적는다.
-  const seriesStartLabel = (points: Array<number | null>) => {
-    const firstKnown = points.findIndex((value) => value !== null);
-    if (firstKnown <= 0) return "";
-    const startedAt = times[firstKnown];
+  const seriesStartLabel = (points: Array<number | null>, period: string) => {
+    const firstSettled = points.findIndex((value) => value !== null);
+    if (firstSettled <= 0) return "";
+    const startedAt = times[firstSettled];
     if (startedAt === undefined) return "";
-    return ` · ${new Intl.DateTimeFormat("ko-KR", { year: "numeric", month: "long" }).format(new Date(startedAt))}부터`;
+    const month = new Intl.DateTimeFormat("ko-KR", { year: "numeric", month: "long" }).format(new Date(startedAt));
+    return ` · ${month} 이전은 ${period} 미달 누적 평균`;
   };
 
   const change = first && last ? ((last - first) / first) * 100 : null;
@@ -1551,14 +1814,12 @@ function DotChart({
         <span className="legendSma20">
           20주선 {formatUsdt(sma20wLatest)}
           {sma20wLatest !== null && !withinScale(sma20wLatest) ? " · 차트 범위 밖" : ""}
-          {seriesStartLabel(sma20wPoints)}
+          {seriesStartLabel(sma20w.settled, "20주")}
         </span>
         <span className="legendSma200">
           200주선 {formatUsdt(sma200wLatest)}
-          {sma200wLatest === null
-            ? " · 주봉 200주 미달"
-            : withinScale(sma200wLatest) ? "" : " · 차트 범위 밖"}
-          {seriesStartLabel(sma200wPoints)}
+          {sma200wLatest !== null && !withinScale(sma200wLatest) ? " · 차트 범위 밖" : ""}
+          {seriesStartLabel(sma200w.settled, "200주")}
         </span>
       </div>
       <div className="chartCanvas">
@@ -1596,8 +1857,10 @@ function DotChart({
           <path d={areaPath} fill="url(#dotAreaGradient)" />
           {min !== null && max !== null && (
             <g clipPath="url(#chartPlotClip)">
-              <path className="smaLine sma200wLine" d={seriesPath(sma200wPoints, min, max, width, height, padding)} fill="none" />
-              <path className="smaLine sma20wLine" d={seriesPath(sma20wPoints, min, max, width, height, padding)} fill="none" />
+              <path className="smaLine sma200wLine partialLine" d={seriesPath(sma200w.partial, min, max, width, height, padding)} fill="none" />
+              <path className="smaLine sma200wLine" d={seriesPath(sma200w.settled, min, max, width, height, padding)} fill="none" />
+              <path className="smaLine sma20wLine partialLine" d={seriesPath(sma20w.partial, min, max, width, height, padding)} fill="none" />
+              <path className="smaLine sma20wLine" d={seriesPath(sma20w.settled, min, max, width, height, padding)} fill="none" />
             </g>
           )}
           <path className="priceLine" d={path} fill="none" stroke={stroke} strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" />
@@ -1656,6 +1919,7 @@ export default function App() {
   const [ecosystemProjects, setEcosystemProjects] = useState<EcosystemProject[]>([]);
   const [newEcosystemProjects, setNewEcosystemProjects] = useState<NewEcosystemProject[]>([]);
   const [range, setRange] = useState<ChartRange>("3m");
+  const [guideKey, setGuideKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [assessmentReady, setAssessmentReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1847,17 +2111,17 @@ export default function App() {
           </p>
         </div>
         {assessmentReady && (
-          <div className="decisionScore">
+          <button className="decisionScore" type="button" onClick={() => setGuideKey("strength")}>
             <strong>{indicator.signal.strength > 0 ? `+${indicator.signal.strength}` : indicator.signal.strength}</strong>
             <small>신호 강도 (-100~100)</small>
             <small>원점수 {indicator.signal.score} · 지표 {indicator.signal.coverage.available}/{indicator.signal.coverage.total}</small>
             <small>신뢰도 {indicator.signal.confidence}%</small>
-          </div>
+          </button>
         )}
       </section>
 
       <section className="metricGrid">
-        <div className="metric">
+        <button className="metric" type="button" onClick={() => setGuideKey("price")}>
           <span>현재가</span>
           <strong>{formatUsdt(ticker?.price ?? indicator.price)} USDT</strong>
           <b className="krwPrice">약 {formatKrw((ticker?.price ?? indicator.price) !== null && fxRate ? (ticker?.price ?? indicator.price ?? 0) * fxRate.rate : null)}</b>
@@ -1865,13 +2129,13 @@ export default function App() {
             {updatedAt ? `${updatedAt.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })} 갱신` : "대기"}
             {fxRate ? ` · 환율 ${formatNumber(fxRate.rate, 1)}원` : ""}
           </small>
-        </div>
-        <div className="metric">
+        </button>
+        <button className="metric" type="button" onClick={() => setGuideKey("dayChange")}>
           <span>24시간 변화</span>
           <strong className={ticker && ticker.changePercent >= 0 ? "upText" : "downText"}>{formatPercent(ticker?.changePercent ?? null)}</strong>
           <small>Binance 24hr ticker</small>
-        </div>
-        <div className="metric">
+        </button>
+        <button className="metric" type="button" onClick={() => setGuideKey("kimchi")}>
           <span>김치 프리미엄</span>
           {(() => {
             const conversionRate = fxRate?.rate ?? null;
@@ -1886,18 +2150,18 @@ export default function App() {
               </>
             );
           })()}
-        </div>
-        <div className="metric">
+        </button>
+        <button className="metric" type="button" onClick={() => setGuideKey("rsi")}>
           <span>RSI</span>
           <strong>{formatNumber(indicator.rsi)}</strong>
           <small>{indicator.rsi !== null && indicator.rsi <= 30 ? "과매도" : indicator.rsi !== null && indicator.rsi >= 70 ? "과열" : "중립"}</small>
-        </div>
-        <div className="metric">
+        </button>
+        <button className="metric" type="button" onClick={() => setGuideKey("sma20w")}>
           <span>20주 평균선</span>
           <strong>{formatUsdt(indicator.sma20w)} USDT</strong>
           <small>{indicator.price && indicator.sma20w ? (indicator.price >= indicator.sma20w ? "현재가 위" : "현재가 아래") : "대기"}</small>
-        </div>
-        <div className="metric">
+        </button>
+        <button className="metric" type="button" onClick={() => setGuideKey("sma200w")}>
           <span>200주 평균선</span>
           <strong>{formatUsdt(indicator.sma200w)} USDT</strong>
           <small>
@@ -1905,57 +2169,57 @@ export default function App() {
               ? weeklyCandles.length === 0 ? "대기" : `주봉 ${weeklyCandles.length}/200주 · 데이터 부족`
               : indicator.price && indicator.price >= indicator.sma200w ? "현재가 위 (장기 강세)" : "현재가 아래 (장기 약세)"}
           </small>
-        </div>
-        <div className="metric">
+        </button>
+        <button className="metric" type="button" onClick={() => setGuideKey("marketCap")}>
           <span>시가총액 순위</span>
           <strong>#{marketInfo?.rank ?? "-"}</strong>
           <small>스테이블 코인 제외 · {formatUsdCompact(marketInfo?.marketCap ?? null)} · {marketInfo?.source ?? "조회 중"}</small>
-        </div>
-        <div className="metric">
+        </button>
+        <button className="metric" type="button" onClick={() => setGuideKey("quoteVolume")}>
           <span>24시간 거래대금</span>
           <strong>{formatUsdCompact(ticker?.quoteVolume ?? null)}</strong>
           <small>Binance {asset.binanceSymbol}</small>
-        </div>
-        <div className="metric">
+        </button>
+        <button className="metric" type="button" onClick={() => setGuideKey("periodChange")}>
           <span>7일 / 30일</span>
           <strong>
             {formatPercent(indicator.change7d)} / {formatPercent(indicator.change30d)}
           </strong>
           <small>Binance 일봉 기준</small>
-        </div>
-        <div className="metric">
+        </button>
+        <button className="metric" type="button" onClick={() => setGuideKey("development")}>
           <span>개발 지수</span>
           <strong className={assessmentReady ? developmentTone(indicator.signal.developmentIndex) : undefined}>
             {assessmentReady && indicator.signal.developmentIndex >= 0 ? indicator.signal.developmentIndex : "-"}
           </strong>
           <small>{assessmentReady ? `${developmentLabel(indicator.signal.developmentIndex)} · 공식 GitHub ${asset.repos.length}개` : "데이터 확인 중"}</small>
-        </div>
-        <div className="metric">
+        </button>
+        <button className="metric" type="button" onClick={() => setGuideKey("btcRegime")}>
           <span>BTC 시장 환경</span>
           <strong className={macroInfo?.btcEma200 && macroInfo.btcPrice >= macroInfo.btcEma200 ? "upText" : "downText"}>
             {macroInfo?.btcEma200 ? (macroInfo.btcPrice >= macroInfo.btcEma200 ? "우호" : "방어") : "-"}
           </strong>
           <small>BTC 200일선 · 24시간 {formatPercent(macroInfo?.btcChange24h ?? null)}</small>
-        </div>
+        </button>
         {asset.btcSymbol && (
-          <div className="metric">
+          <button className="metric" type="button" onClick={() => setGuideKey("assetBtc")}>
             <span>{asset.symbol}/BTC 상대 강도</span>
             <strong className={(macroInfo?.assetBtcChange7d ?? 0) >= 0 ? "upText" : "downText"}>{formatPercent(macroInfo?.assetBtcChange7d ?? null)}</strong>
             <small>최근 7일 · BTC 대비</small>
-          </div>
+          </button>
         )}
-        <div className="metric">
+        <button className="metric" type="button" onClick={() => setGuideKey("confidence")}>
           <span>신호 신뢰도</span>
           <strong className={assessmentReady && indicator.signal.confidence >= 70 ? "upText" : "watchText"}>{assessmentReady ? `${indicator.signal.confidence}%` : "-"}</strong>
           <small>ADX·데이터 완성도·점수 강도</small>
-        </div>
-        <div className="metric">
+        </button>
+        <button className="metric" type="button" onClick={() => setGuideKey("risk")}>
           <span>변동 위험</span>
           <strong className={indicator.signal.riskLevel === "high" ? "downText" : indicator.signal.riskLevel === "medium" ? "watchText" : "upText"}>
             {indicator.signal.riskLevel === "high" ? "높음" : indicator.signal.riskLevel === "medium" ? "보통" : indicator.signal.riskLevel === "low" ? "낮음" : "-"}
           </strong>
           <small>ATR {indicator.price && indicator.atr ? formatPercent((indicator.atr / indicator.price) * 100) : "-"}</small>
-        </div>
+        </button>
       </section>
 
       <div className="rangeControls" aria-label="그래프 기간">
@@ -1982,7 +2246,11 @@ export default function App() {
         </div>
         <div className="reasonList">
           {assessmentReady ? (
-            indicator.signal.reasons.map((reason) => <div key={reason}>{reason}</div>)
+            indicator.signal.reasonDetails.map((reason) => (
+              guideFor(reason.key)
+                ? <button key={reason.text} type="button" onClick={() => setGuideKey(reason.key)}>{reason.text}</button>
+                : <div key={reason.text}>{reason.text}</div>
+            ))
           ) : (
             <div>{loading ? `${asset.symbol} 가격·뉴스·개발 데이터를 수집하고 있습니다.` : "필수 데이터가 완성되지 않아 판단을 보류했습니다."}</div>
           )}
@@ -2317,6 +2585,8 @@ export default function App() {
           </div>
         </div>
       </section>
+
+      {guideKey && <MetricGuideModal guideKey={guideKey} onClose={() => setGuideKey(null)} />}
     </main>
   );
 }
