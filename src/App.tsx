@@ -43,11 +43,13 @@ const ASSETS = Object.fromEntries(
   ]),
 ) as Record<keyof typeof assetsJson, AssetConfig>;
 const CHART_RANGES = [
+  { label: "1일", value: "1d", days: 1 },
   { label: "1주", value: "7d", days: 7 },
   { label: "1개월", value: "1m", days: 30 },
   { label: "3개월", value: "3m", days: 90 },
   { label: "6개월", value: "6m", days: 180 },
   { label: "1년", value: "1y", days: 365 },
+  { label: "전체", value: "all", days: Number.POSITIVE_INFINITY },
 ] as const;
 const BINANCE_BASES = ["https://data-api.binance.vision", "https://api.binance.com", "https://api1.binance.com"];
 const POLKADOT_RELAY_RPC_ENDPOINTS = ["https://rpc.polkadot.io", "https://polkadot-rpc.publicnode.com"];
@@ -402,8 +404,59 @@ function rangeDays(range: ChartRange) {
   return CHART_RANGES.find((item) => item.value === range)?.days ?? 365;
 }
 
-function sliceByRange<T>(values: T[] | undefined, range: ChartRange) {
-  return values?.slice(-rangeDays(range)) ?? [];
+// Candle granularity differs per range (15m intraday, daily, weekly), so the
+// window is cut by timestamp rather than by a fixed number of candles.
+function sliceCandlesByRange<T extends { openTime: number }>(candles: T[], range: ChartRange, now = Date.now()) {
+  const days = rangeDays(range);
+  if (!Number.isFinite(days)) return candles;
+  const from = now - days * 86_400_000;
+  const windowed = candles.filter((candle) => candle.openTime >= from);
+  return windowed.length >= 2 ? windowed : candles.slice(-2);
+}
+
+function rollingSma(values: number[], period: number) {
+  let sum = 0;
+  return values.map((value, index) => {
+    sum += value;
+    if (index >= period) sum -= values[index - period];
+    return index >= period - 1 ? sum / period : null;
+  });
+}
+
+// Steps a coarser series (e.g. weekly averages) onto a finer x-axis by holding
+// the last value that was already known at each target timestamp.
+function sampleSeries(series: Array<{ time: number; value: number }>, targets: number[]) {
+  let cursor = 0;
+  let held: number | null = null;
+  return targets.map((target) => {
+    while (cursor < series.length && series[cursor].time <= target) {
+      held = series[cursor].value;
+      cursor += 1;
+    }
+    return held;
+  });
+}
+
+// Draws a series that may have gaps: each run of known values becomes its own
+// subpath so a missing stretch leaves a break instead of a straight shortcut.
+function seriesPath(values: Array<number | null>, min: number, max: number, width: number, height: number, padding: number) {
+  if (values.length < 2) return "";
+  const range = max - min || 1;
+  const usableWidth = width - padding * 2;
+  const usableHeight = height - padding * 2;
+  let path = "";
+  let penDown = false;
+  values.forEach((value, index) => {
+    if (value === null) {
+      penDown = false;
+      return;
+    }
+    const x = padding + (index / (values.length - 1)) * usableWidth;
+    const y = padding + (1 - (value - min) / range) * usableHeight;
+    path += `${penDown ? " L" : `${path ? " " : ""}M`} ${x.toFixed(2)} ${y.toFixed(2)}`;
+    penDown = true;
+  });
+  return path;
 }
 
 function chartPath(values: number[], width: number, height: number, padding = 14) {
@@ -432,6 +485,45 @@ function monthMarkers(times: number[], width: number, padding: number) {
       const previous = index > 0 ? new Date(times[index - 1]) : null;
       if (index === 0 || !previous || date.getMonth() === previous.getMonth()) return null;
       return { x: padding + (index / (times.length - 1)) * usableWidth, label: `${date.getMonth() + 1}월` };
+    })
+    .filter((marker): marker is { x: number; label: string } => marker !== null);
+}
+
+function hourMarkers(times: number[], width: number, padding: number) {
+  if (times.length < 2) return [];
+  const usableWidth = width - padding * 2;
+  return times
+    .map((time, index) => {
+      const date = new Date(time);
+      const previous = index > 0 ? new Date(times[index - 1]) : null;
+      if (index === 0 || !previous || date.getHours() === previous.getHours() || date.getHours() % 6 !== 0) return null;
+      return { x: padding + (index / (times.length - 1)) * usableWidth, label: `${date.getHours()}시` };
+    })
+    .filter((marker): marker is { x: number; label: string } => marker !== null);
+}
+
+function dayMarkers(times: number[], width: number, padding: number, step: number) {
+  if (times.length < 2) return [];
+  const usableWidth = width - padding * 2;
+  return times
+    .map((time, index) => {
+      const date = new Date(time);
+      const fromEnd = times.length - 1 - index;
+      if (fromEnd === 0 || fromEnd % step !== 0) return null;
+      return { x: padding + (index / (times.length - 1)) * usableWidth, label: `${date.getMonth() + 1}/${date.getDate()}` };
+    })
+    .filter((marker): marker is { x: number; label: string } => marker !== null);
+}
+
+function yearMarkers(times: number[], width: number, padding: number) {
+  if (times.length < 2) return [];
+  const usableWidth = width - padding * 2;
+  return times
+    .map((time, index) => {
+      const date = new Date(time);
+      const previous = index > 0 ? new Date(times[index - 1]) : null;
+      if (index === 0 || !previous || date.getFullYear() === previous.getFullYear()) return null;
+      return { x: padding + (index / (times.length - 1)) * usableWidth, label: `${date.getFullYear()}` };
     })
     .filter((marker): marker is { x: number; label: string } => marker !== null);
 }
@@ -588,9 +680,17 @@ async function fetchCandles(symbol: string) {
   }));
 }
 
-async function fetchWeeklyCloses(symbol: string) {
-  const rows = (await fetchBinanceJson(`/api/v3/klines?symbol=${symbol}&interval=1w&limit=210`)) as Array<[number, string, string, string, string, string]>;
-  return rows.map((row) => Number(row[4])).filter((close) => Number.isFinite(close) && close > 0);
+async function fetchKlineCandles(symbol: string, interval: string, limit: number): Promise<Candle[]> {
+  const rows = (await fetchBinanceJson(`/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`)) as Array<[number, string, string, string, string, string]>;
+  return rows
+    .map((row) => ({
+      openTime: Number(row[0]),
+      high: Number(row[2]),
+      low: Number(row[3]),
+      close: Number(row[4]),
+      volume: Number(row[5]),
+    }))
+    .filter((candle) => Number.isFinite(candle.close) && candle.close > 0);
 }
 
 async function fetchTicker24h(symbol: string) {
@@ -1343,29 +1443,71 @@ async function fetchStoredOnchainInfo(): Promise<OnchainInfo | null> {
 function DotChart({
   asset,
   candles,
+  intradayCandles,
+  weeklyCandles,
   range,
   ticker,
 }: {
   asset: AssetConfig;
   candles: Candle[];
+  intradayCandles: Candle[];
+  weeklyCandles: Candle[];
   range: ChartRange;
   ticker: { price: number; volume: number } | null;
 }) {
   const width = 960;
   const height = 250;
   const padding = 18;
-  const visibleCandles = sliceByRange(mergeLiveTodayCandle(candles, ticker), range);
+  // 1일은 15분봉, 전체는 주봉, 나머지는 일봉을 쓴다.
+  const granularity: "intraday" | "daily" | "weekly" = range === "1d" && intradayCandles.length >= 2
+    ? "intraday"
+    : range === "all" && weeklyCandles.length >= 2
+      ? "weekly"
+      : "daily";
+  const sourceCandles = granularity === "intraday"
+    ? intradayCandles
+    : granularity === "weekly"
+      ? weeklyCandles
+      : mergeLiveTodayCandle(candles, ticker);
+  const visibleCandles = sliceCandlesByRange(sourceCandles, range);
   const values = visibleCandles.map((candle) => candle.close);
   const times = visibleCandles.map((candle) => candle.openTime);
   const path = chartPath(values, width, height, padding);
-  const markers = monthMarkers(times, width, padding);
-  const weeklyMarkers = weekMarkers(times, width, padding);
+  const markers = granularity === "intraday"
+    ? hourMarkers(times, width, padding)
+    : granularity === "weekly"
+      ? yearMarkers(times, width, padding)
+      : rangeDays(range) <= 30
+        ? dayMarkers(times, width, padding, rangeDays(range) <= 7 ? 1 : 5)
+        : monthMarkers(times, width, padding);
+  const weeklyMarkers = granularity === "daily" && rangeDays(range) <= 180 ? weekMarkers(times, width, padding) : [];
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const selectedCandle = selectedIndex !== null ? visibleCandles[selectedIndex] ?? null : null;
   const first = values[0] ?? null;
   const last = values[values.length - 1] ?? null;
   const min = values.length ? Math.min(...values) : null;
   const max = values.length ? Math.max(...values) : null;
+
+  // 주봉 종가로 20주·200주 이동평균 시계열을 만들고, 20주선은 일봉 구간에서
+  // 일 단위로 다시 계산해 계단이 아닌 곡선으로 보이게 한다.
+  const weeklyCloses = weeklyCandles.map((candle) => candle.close);
+  const weeklySma20 = rollingSma(weeklyCloses, 20);
+  const weeklySma200 = rollingSma(weeklyCloses, 200);
+  const toSeries = (averages: Array<number | null>) => weeklyCandles
+    .map((candle, index) => ({ time: candle.openTime, value: averages[index] }))
+    .filter((point): point is { time: number; value: number } => point.value !== null);
+  const dailySma20wAverages = rollingSma(candles.map((candle) => candle.close), 140);
+  const dailySma20wSeries = candles
+    .map((candle, index) => ({ time: candle.openTime, value: dailySma20wAverages[index] }))
+    .filter((point): point is { time: number; value: number } => point.value !== null);
+  // 전체 구간은 일봉 365개로 커버되지 않으므로 주봉 20개 평균으로 대신 그린다.
+  const sma20wPoints = sampleSeries(granularity === "weekly" ? toSeries(weeklySma20) : dailySma20wSeries, times);
+  const sma200wPoints = sampleSeries(toSeries(weeklySma200), times);
+  // 지표 카드와 같은 정의(일봉 140개 평균)를 표기해 두 값이 어긋나지 않게 한다.
+  const sma20wLatest = dailySma20wSeries[dailySma20wSeries.length - 1]?.value ?? sma20wPoints[sma20wPoints.length - 1] ?? null;
+  const sma200wLatest = sma200wPoints[sma200wPoints.length - 1] ?? null;
+  const withinScale = (value: number | null) => value !== null && min !== null && max !== null && value >= min && value <= max;
+
   const change = first && last ? ((last - first) / first) * 100 : null;
   const stroke = change !== null && change >= 0 ? "#36e7b8" : "#ff746b";
   const areaPath = path ? `${path} L ${width - padding} ${height - padding} L ${padding} ${height - padding} Z` : "";
@@ -1373,6 +1515,11 @@ function DotChart({
   const currentTop = Math.max(8, Math.min(88, (currentY / height) * 100));
   const selectedX = selectedIndex !== null && visibleCandles.length > 1 ? padding + (selectedIndex / (visibleCandles.length - 1)) * (width - padding * 2) : null;
   const selectedY = selectedCandle !== null && min !== null && max !== null ? padding + (1 - (selectedCandle.close - min) / (max - min || 1)) * (height - padding * 2) : null;
+  const rangeLabel = CHART_RANGES.find((item) => item.value === range)?.label ?? "";
+  const sourceLabel = granularity === "intraday" ? "15분봉" : granularity === "weekly" ? "주봉" : "일봉";
+  const selectedTimeFormat: Intl.DateTimeFormatOptions = granularity === "intraday"
+    ? { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }
+    : { year: "numeric", month: "short", day: "numeric" };
 
   return (
     <section className="panel chartPanel">
@@ -1380,15 +1527,28 @@ function DotChart({
         <div>
           <span>{asset.symbol} 가격 추이</span>
           <strong>{last ? `${formatUsdt(last)} USDT` : "-"}</strong>
-          <small>고가 {formatUsdt(max)} · 저가 {formatUsdt(min)}</small>
+          <small>고가 {formatUsdt(max)} · 저가 {formatUsdt(min)} · {rangeLabel} {sourceLabel}</small>
         </div>
         <b className={change !== null && change >= 0 ? "positive" : "negative"}>{formatPercent(change)}</b>
+      </div>
+      <div className="chartLegend">
+        <span className="legendPrice" style={{ color: stroke }}>종가</span>
+        <span className="legendSma20">
+          20주선 {formatUsdt(sma20wLatest)}
+          {sma20wLatest !== null && !withinScale(sma20wLatest) ? " · 차트 범위 밖" : ""}
+        </span>
+        <span className="legendSma200">
+          200주선 {formatUsdt(sma200wLatest)}
+          {sma200wLatest === null
+            ? " · 주봉 200주 미달"
+            : withinScale(sma200wLatest) ? "" : " · 차트 범위 밖"}
+        </span>
       </div>
       <div className="chartCanvas">
         <svg
           viewBox={`0 0 ${width} ${height}`}
           role="img"
-          aria-label={`${asset.symbol} 가격 차트. 누르면 해당 날짜의 시세와 거래량을 확인할 수 있습니다.`}
+          aria-label={`${asset.symbol} 가격 차트. 20주·200주 이동평균선을 함께 표시합니다. 누르면 해당 시점의 시세와 거래량을 확인할 수 있습니다.`}
           preserveAspectRatio="none"
           onPointerDown={(event) => {
             if (!visibleCandles.length) return;
@@ -1403,6 +1563,9 @@ function DotChart({
               <stop offset="72%" stopColor={stroke} stopOpacity="0.05" />
               <stop offset="100%" stopColor={stroke} stopOpacity="0" />
             </linearGradient>
+            <clipPath id="chartPlotClip">
+              <rect x="0" y="0" width={width} height={height} />
+            </clipPath>
           </defs>
           {[0.25, 0.5, 0.75, 1].map((ratio) => (
             <path className="chartGrid" d={`M 0 ${height * ratio} L ${width} ${height * ratio}`} key={ratio} />
@@ -1414,6 +1577,12 @@ function DotChart({
             <path className="chartMonthLine" d={`M ${marker.x.toFixed(2)} 0 L ${marker.x.toFixed(2)} ${height}`} key={`${marker.label}-${marker.x}`} />
           ))}
           <path d={areaPath} fill="url(#dotAreaGradient)" />
+          {min !== null && max !== null && (
+            <g clipPath="url(#chartPlotClip)">
+              <path className="smaLine sma200wLine" d={seriesPath(sma200wPoints, min, max, width, height, padding)} fill="none" />
+              <path className="smaLine sma20wLine" d={seriesPath(sma20wPoints, min, max, width, height, padding)} fill="none" />
+            </g>
+          )}
           <path className="priceLine" d={path} fill="none" stroke={stroke} strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" />
           {selectedX !== null && selectedY !== null && (
             <>
@@ -1428,7 +1597,7 @@ function DotChart({
               {marker.label}
             </span>
           ))}
-          <span className="todayLabel">오늘</span>
+          <span className="todayLabel">{granularity === "intraday" ? "지금" : "오늘"}</span>
         </div>
         {last !== null && (
           <span className="currentPriceTag" style={{ top: `${currentTop}%`, borderColor: stroke, color: stroke }}>
@@ -1437,7 +1606,7 @@ function DotChart({
         )}
         {selectedCandle && selectedX !== null && (
           <div className={`chartTooltip ${selectedX / width > 0.72 ? "alignRight" : ""}`} style={{ left: `${(selectedX / width) * 100}%` }}>
-            <b>{new Intl.DateTimeFormat("ko-KR", { year: "numeric", month: "short", day: "numeric" }).format(new Date(selectedCandle.openTime))}</b>
+            <b>{new Intl.DateTimeFormat("ko-KR", selectedTimeFormat).format(new Date(selectedCandle.openTime))}</b>
             <span>종가 <strong>{formatUsdt(selectedCandle.close)} USDT</strong></span>
             <span>거래량 <strong>{formatNumber(selectedCandle.volume, 0)} {asset.symbol}</strong></span>
           </div>
@@ -1458,7 +1627,8 @@ export default function App() {
   const [marketInfo, setMarketInfo] = useState<DotMarketInfo | null>(null);
   const [fxRate, setFxRate] = useState<FxRate | null>(null);
   const [upbitPrices, setUpbitPrices] = useState<UpbitPrices | null>(null);
-  const [weeklyCloses, setWeeklyCloses] = useState<number[]>([]);
+  const [weeklyCandles, setWeeklyCandles] = useState<Candle[]>([]);
+  const [intradayCandles, setIntradayCandles] = useState<Candle[]>([]);
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
   const [xrplInfo, setXrplInfo] = useState<XrplInfo | null>(null);
   const [avalancheInfo, setAvalancheInfo] = useState<AvalancheInfo | null>(null);
@@ -1482,7 +1652,7 @@ export default function App() {
     const volumes = candles.map((candle) => candle.volume);
     const price = ticker?.price ?? closes[closes.length - 1] ?? null;
     const sma20w = calculateSma(closes, 140);
-    const sma200w = calculateSma(weeklyCloses, 200);
+    const sma200w = calculateSma(weeklyCandles.map((candle) => candle.close), 200);
     const ema50 = calculateEma(closes, 50);
     const ema200 = calculateEma(closes, 200);
     const rsi = calculateRsi(closes);
@@ -1506,7 +1676,7 @@ export default function App() {
     const signal = buildSignal(asset, candles, ticker?.price ?? null, ticker?.changePercent ?? null, change7d, news, devItems, networkHealthy, macroInfo, derivativesInfo, onchainInfo, etfInfo, storedDevelopmentIndex);
 
     return { price, sma20w, sma200w, ema50, ema200, rsi, macd, atr, adx, bollinger, volumeRatio, yearlyHigh, yearlyLow, fibPosition, change7d, change30d, signal };
-  }, [asset, avalancheInfo, candles, derivativesInfo, devItems, etfInfo, macroInfo, networkInfo, news, onchainInfo, storedDevelopmentIndex, ticker, weeklyCloses, xrplInfo]);
+  }, [asset, avalancheInfo, candles, derivativesInfo, devItems, etfInfo, macroInfo, networkInfo, news, onchainInfo, storedDevelopmentIndex, ticker, weeklyCandles, xrplInfo]);
 
   async function loadData() {
     const requestId = ++loadRequestRef.current;
@@ -1515,7 +1685,8 @@ export default function App() {
     setError(null);
     setEcosystemError(null);
     setCandles([]);
-    setWeeklyCloses([]);
+    setWeeklyCandles([]);
+    setIntradayCandles([]);
     setTicker(null);
     setNews([]);
     setDevItems([]);
@@ -1532,9 +1703,10 @@ export default function App() {
     setEcosystemProjects([]);
     setNewEcosystemProjects([]);
     try {
-      const [candlesResult, weeklyClosesResult, tickerResult, newsResult, devResult, marketResult, fxResult, upbitResult, networkResult, xrplResult, avalancheResult, ecosystemResult, macroResult, derivativesResult, onchainResult, etfResult, storedDevelopmentResult] = await Promise.allSettled([
+      const [candlesResult, weeklyCandlesResult, intradayCandlesResult, tickerResult, newsResult, devResult, marketResult, fxResult, upbitResult, networkResult, xrplResult, avalancheResult, ecosystemResult, macroResult, derivativesResult, onchainResult, etfResult, storedDevelopmentResult] = await Promise.allSettled([
         fetchCandles(asset.binanceSymbol),
-        fetchWeeklyCloses(asset.binanceSymbol),
+        fetchKlineCandles(asset.binanceSymbol, "1w", 1000),
+        fetchKlineCandles(asset.binanceSymbol, "15m", 96),
         fetchTicker24h(asset.binanceSymbol),
         fetchNews(asset),
         fetchDevStatus(asset.repos),
@@ -1558,7 +1730,8 @@ export default function App() {
       if (requestId !== loadRequestRef.current) return;
 
       if (candlesResult.status === "fulfilled") setCandles(candlesResult.value);
-      if (weeklyClosesResult.status === "fulfilled") setWeeklyCloses(weeklyClosesResult.value);
+      if (weeklyCandlesResult.status === "fulfilled") setWeeklyCandles(weeklyCandlesResult.value);
+      if (intradayCandlesResult.status === "fulfilled") setIntradayCandles(intradayCandlesResult.value);
       if (tickerResult.status === "fulfilled") setTicker(tickerResult.value);
       if (newsResult.status === "fulfilled") setNews(newsResult.value);
       if (devResult.status === "fulfilled") setDevItems(devResult.value);
@@ -1712,7 +1885,7 @@ export default function App() {
           <strong>{formatUsdt(indicator.sma200w)} USDT</strong>
           <small>
             {indicator.sma200w === null
-              ? weeklyCloses.length === 0 ? "대기" : `주봉 ${weeklyCloses.length}/200주 · 데이터 부족`
+              ? weeklyCandles.length === 0 ? "대기" : `주봉 ${weeklyCandles.length}/200주 · 데이터 부족`
               : indicator.price && indicator.price >= indicator.sma200w ? "현재가 위 (장기 강세)" : "현재가 아래 (장기 약세)"}
           </small>
         </div>
@@ -1776,7 +1949,14 @@ export default function App() {
         ))}
       </div>
 
-      <DotChart asset={asset} candles={candles} range={range} ticker={ticker} />
+      <DotChart
+        asset={asset}
+        candles={candles}
+        intradayCandles={intradayCandles}
+        weeklyCandles={weeklyCandles}
+        range={range}
+        ticker={ticker}
+      />
 
       <section className="panel reasonPanel">
         <div className="panelTitle">
