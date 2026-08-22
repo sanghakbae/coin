@@ -234,7 +234,7 @@ h1 {
   display: grid;
   place-items: center;
   gap: 3px;
-  min-width: 96px;
+  min-width: 132px;
   min-height: 78px;
   border: 1px solid rgba(148, 163, 184, 0.18);
   border-radius: 9px;
@@ -1065,7 +1065,7 @@ dd small {
   }
 
   .decisionScore {
-    min-width: 76px;
+    min-width: 108px;
     min-height: 64px;
   }
 

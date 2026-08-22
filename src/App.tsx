@@ -74,6 +74,9 @@ interface DotSignal {
   direction: SignalDirection;
   label: string;
   score: number;
+  strength: number;
+  scoreRange: { positive: number; negative: number };
+  coverage: { available: number; total: number };
   developmentIndex: number;
   confidence: number;
   riskLevel: "low" | "medium" | "high" | "unknown";
@@ -114,7 +117,6 @@ interface FxRate {
 
 interface UpbitPrices {
   assetPriceKrw: number;
-  usdtKrw: number | null;
 }
 
 interface NetworkInfo {
@@ -514,7 +516,7 @@ function buildSignal(
   const atr = calculateAtr(candles);
   const adx = calculateAdx(candles);
   const developmentIndex = devItems.length ? calculateDevelopmentIndex(devItems, asset.repos.length) : storedDevelopmentIndex ?? -1;
-  const trendState: -1 | 0 | 1 = ema50 !== null && ema200 !== null && price > ema50 && ema50 > ema200 ? 1 : ema50 !== null && ema200 !== null && price < ema50 && ema50 < ema200 ? -1 : 0;
+  const trendState: -1 | 0 | 1 | null = ema50 === null || ema200 === null ? null : price > ema50 && ema50 > ema200 ? 1 : price < ema50 && ema50 < ema200 ? -1 : 0;
   const btcRegime: -1 | 0 | 1 = macroInfo?.btcEma200 ? (macroInfo.btcPrice >= macroInfo.btcEma200 ? 1 : -1) : 0;
   const result = evaluateDotSignal({
     assetSymbol: asset.symbol,
@@ -536,7 +538,7 @@ function buildSignal(
     longShortRatio: derivativesInfo?.longShortRatio ?? null,
     macdHistogram: histogram,
     networkHealthy,
-    newsBalance: news.reduce((sum, item) => sum + item.sentiment, 0),
+    newsBalance: news.length ? news.reduce((sum, item) => sum + item.sentiment, 0) : null,
     openInterestChange24h: derivativesInfo?.openInterestChange24h ?? null,
     priceUp: price >= previous,
     rsi,
@@ -586,6 +588,11 @@ async function fetchCandles(symbol: string) {
   }));
 }
 
+async function fetchWeeklyCloses(symbol: string) {
+  const rows = (await fetchBinanceJson(`/api/v3/klines?symbol=${symbol}&interval=1w&limit=210`)) as Array<[number, string, string, string, string, string]>;
+  return rows.map((row) => Number(row[4])).filter((close) => Number.isFinite(close) && close > 0);
+}
+
 async function fetchTicker24h(symbol: string) {
   const row = (await fetchBinanceJson(`/api/v3/ticker/24hr?symbol=${symbol}`)) as { lastPrice: string; priceChangePercent: string; volume: string; quoteVolume: string };
   return {
@@ -597,20 +604,15 @@ async function fetchTicker24h(symbol: string) {
 }
 
 async function fetchUpbitPrices(assetSymbol: string): Promise<UpbitPrices> {
-  const markets = [`KRW-${assetSymbol}`, "KRW-USDT"];
-  const response = await fetch(`https://api.upbit.com/v1/ticker?markets=${markets.join(",")}`, {
+  const response = await fetch(`https://api.upbit.com/v1/ticker?markets=KRW-${assetSymbol}`, {
     cache: "no-store",
     headers: { accept: "application/json" },
   });
   if (!response.ok) throw new Error(`Upbit 현재가 요청 실패: ${response.status}`);
   const rows = (await response.json()) as Array<{ market: string; trade_price: number }>;
   const assetPriceKrw = Number(rows.find((row) => row.market === `KRW-${assetSymbol}`)?.trade_price);
-  const usdtKrw = Number(rows.find((row) => row.market === "KRW-USDT")?.trade_price);
   if (!Number.isFinite(assetPriceKrw) || assetPriceKrw <= 0) throw new Error(`Upbit KRW-${assetSymbol} 현재가 없음`);
-  return {
-    assetPriceKrw,
-    usdtKrw: Number.isFinite(usdtKrw) && usdtKrw > 0 ? usdtKrw : null,
-  };
+  return { assetPriceKrw };
 }
 
 async function fetchMacroInfo(assetBtcSymbol: string | null): Promise<MacroInfo> {
@@ -1456,6 +1458,7 @@ export default function App() {
   const [marketInfo, setMarketInfo] = useState<DotMarketInfo | null>(null);
   const [fxRate, setFxRate] = useState<FxRate | null>(null);
   const [upbitPrices, setUpbitPrices] = useState<UpbitPrices | null>(null);
+  const [weeklyCloses, setWeeklyCloses] = useState<number[]>([]);
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
   const [xrplInfo, setXrplInfo] = useState<XrplInfo | null>(null);
   const [avalancheInfo, setAvalancheInfo] = useState<AvalancheInfo | null>(null);
@@ -1479,6 +1482,7 @@ export default function App() {
     const volumes = candles.map((candle) => candle.volume);
     const price = ticker?.price ?? closes[closes.length - 1] ?? null;
     const sma20w = calculateSma(closes, 140);
+    const sma200w = calculateSma(weeklyCloses, 200);
     const ema50 = calculateEma(closes, 50);
     const ema200 = calculateEma(closes, 200);
     const rsi = calculateRsi(closes);
@@ -1501,8 +1505,8 @@ export default function App() {
           : null;
     const signal = buildSignal(asset, candles, ticker?.price ?? null, ticker?.changePercent ?? null, change7d, news, devItems, networkHealthy, macroInfo, derivativesInfo, onchainInfo, etfInfo, storedDevelopmentIndex);
 
-    return { price, sma20w, ema50, ema200, rsi, macd, atr, adx, bollinger, volumeRatio, yearlyHigh, yearlyLow, fibPosition, change7d, change30d, signal };
-  }, [asset, avalancheInfo, candles, derivativesInfo, devItems, etfInfo, macroInfo, networkInfo, news, onchainInfo, storedDevelopmentIndex, ticker, xrplInfo]);
+    return { price, sma20w, sma200w, ema50, ema200, rsi, macd, atr, adx, bollinger, volumeRatio, yearlyHigh, yearlyLow, fibPosition, change7d, change30d, signal };
+  }, [asset, avalancheInfo, candles, derivativesInfo, devItems, etfInfo, macroInfo, networkInfo, news, onchainInfo, storedDevelopmentIndex, ticker, weeklyCloses, xrplInfo]);
 
   async function loadData() {
     const requestId = ++loadRequestRef.current;
@@ -1511,6 +1515,7 @@ export default function App() {
     setError(null);
     setEcosystemError(null);
     setCandles([]);
+    setWeeklyCloses([]);
     setTicker(null);
     setNews([]);
     setDevItems([]);
@@ -1527,8 +1532,9 @@ export default function App() {
     setEcosystemProjects([]);
     setNewEcosystemProjects([]);
     try {
-      const [candlesResult, tickerResult, newsResult, devResult, marketResult, fxResult, upbitResult, networkResult, xrplResult, avalancheResult, ecosystemResult, macroResult, derivativesResult, onchainResult, etfResult, storedDevelopmentResult] = await Promise.allSettled([
+      const [candlesResult, weeklyClosesResult, tickerResult, newsResult, devResult, marketResult, fxResult, upbitResult, networkResult, xrplResult, avalancheResult, ecosystemResult, macroResult, derivativesResult, onchainResult, etfResult, storedDevelopmentResult] = await Promise.allSettled([
         fetchCandles(asset.binanceSymbol),
+        fetchWeeklyCloses(asset.binanceSymbol),
         fetchTicker24h(asset.binanceSymbol),
         fetchNews(asset),
         fetchDevStatus(asset.repos),
@@ -1552,6 +1558,7 @@ export default function App() {
       if (requestId !== loadRequestRef.current) return;
 
       if (candlesResult.status === "fulfilled") setCandles(candlesResult.value);
+      if (weeklyClosesResult.status === "fulfilled") setWeeklyCloses(weeklyClosesResult.value);
       if (tickerResult.status === "fulfilled") setTicker(tickerResult.value);
       if (newsResult.status === "fulfilled") setNews(newsResult.value);
       if (devResult.status === "fulfilled") setDevItems(devResult.value);
@@ -1651,8 +1658,9 @@ export default function App() {
         </div>
         {assessmentReady && (
           <div className="decisionScore">
-            <strong>{indicator.signal.score}</strong>
-            <small>종합 점수</small>
+            <strong>{indicator.signal.strength > 0 ? `+${indicator.signal.strength}` : indicator.signal.strength}</strong>
+            <small>신호 강도 (-100~100)</small>
+            <small>원점수 {indicator.signal.score} · 지표 {indicator.signal.coverage.available}/{indicator.signal.coverage.total}</small>
             <small>신뢰도 {indicator.signal.confidence}%</small>
           </div>
         )}
@@ -1676,7 +1684,7 @@ export default function App() {
         <div className="metric">
           <span>김치 프리미엄</span>
           {(() => {
-            const conversionRate = upbitPrices?.usdtKrw ?? fxRate?.rate ?? null;
+            const conversionRate = fxRate?.rate ?? null;
             const premium = calculateKimchiPremium(upbitPrices?.assetPriceKrw ?? null, ticker?.price ?? null, conversionRate);
             return (
               <>
@@ -1684,7 +1692,7 @@ export default function App() {
                 <small>
                   업비트 {formatKrw(upbitPrices?.assetPriceKrw ?? null)} · Binance 환산 {formatKrw(ticker && conversionRate ? ticker.price * conversionRate : null)}
                 </small>
-                <small>{upbitPrices?.usdtKrw ? `업비트 USDT ${formatNumber(upbitPrices.usdtKrw, 0)}원 기준` : "원달러 환율 기준"}</small>
+                <small>{fxRate ? `원달러 환율 ${formatNumber(fxRate.rate, 1)}원 기준` : "원달러 환율 대기"}</small>
               </>
             );
           })()}
@@ -1698,6 +1706,15 @@ export default function App() {
           <span>20주 평균선</span>
           <strong>{formatUsdt(indicator.sma20w)} USDT</strong>
           <small>{indicator.price && indicator.sma20w ? (indicator.price >= indicator.sma20w ? "현재가 위" : "현재가 아래") : "대기"}</small>
+        </div>
+        <div className="metric">
+          <span>200주 평균선</span>
+          <strong>{formatUsdt(indicator.sma200w)} USDT</strong>
+          <small>
+            {indicator.sma200w === null
+              ? weeklyCloses.length === 0 ? "대기" : `주봉 ${weeklyCloses.length}/200주 · 데이터 부족`
+              : indicator.price && indicator.price >= indicator.sma200w ? "현재가 위 (장기 강세)" : "현재가 아래 (장기 약세)"}
+          </small>
         </div>
         <div className="metric">
           <span>시가총액 순위</span>
@@ -1730,11 +1747,13 @@ export default function App() {
           </strong>
           <small>BTC 200일선 · 24시간 {formatPercent(macroInfo?.btcChange24h ?? null)}</small>
         </div>
-        <div className="metric">
-          <span>{asset.symbol}/BTC 상대 강도</span>
-          <strong className={(macroInfo?.assetBtcChange7d ?? 0) >= 0 ? "upText" : "downText"}>{formatPercent(macroInfo?.assetBtcChange7d ?? null)}</strong>
-          <small>최근 7일 · BTC 대비</small>
-        </div>
+        {asset.btcSymbol && (
+          <div className="metric">
+            <span>{asset.symbol}/BTC 상대 강도</span>
+            <strong className={(macroInfo?.assetBtcChange7d ?? 0) >= 0 ? "upText" : "downText"}>{formatPercent(macroInfo?.assetBtcChange7d ?? null)}</strong>
+            <small>최근 7일 · BTC 대비</small>
+          </div>
+        )}
         <div className="metric">
           <span>신호 신뢰도</span>
           <strong className={assessmentReady && indicator.signal.confidence >= 70 ? "upText" : "watchText"}>{assessmentReady ? `${indicator.signal.confidence}%` : "-"}</strong>

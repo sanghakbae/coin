@@ -1,13 +1,13 @@
-export function calculateKimchiPremium(upbitPriceKrw, binancePriceUsdt, usdtKrw) {
+export function calculateKimchiPremium(upbitPriceKrw, binancePriceUsdt, usdKrw) {
   if (
     !Number.isFinite(upbitPriceKrw)
     || !Number.isFinite(binancePriceUsdt)
-    || !Number.isFinite(usdtKrw)
+    || !Number.isFinite(usdKrw)
     || upbitPriceKrw <= 0
     || binancePriceUsdt <= 0
-    || usdtKrw <= 0
+    || usdKrw <= 0
   ) {
     return null;
   }
-  return (upbitPriceKrw / (binancePriceUsdt * usdtKrw) - 1) * 100;
+  return (upbitPriceKrw / (binancePriceUsdt * usdKrw) - 1) * 100;
 }

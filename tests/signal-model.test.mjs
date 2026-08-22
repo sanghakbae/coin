@@ -21,12 +21,12 @@ const neutralInput = {
   longShortRatio: null,
   macdHistogram: null,
   networkHealthy: null,
-  newsBalance: 0,
+  newsBalance: null,
   openInterestChange24h: null,
   priceUp: false,
   rsi: null,
   stakedPercent: null,
-  trendState: 0,
+  trendState: null,
   volumeRatio: null,
 };
 
@@ -73,4 +73,70 @@ test("TDOT share inflow contributes to the composite score", () => {
   });
   assert.equal(result.components.etf, 8);
   assert.equal(result.score, 8);
+});
+
+test("normalizes the score into a -100~100 strength over available components only", () => {
+  const noData = evaluateDotSignal(neutralInput);
+  assert.equal(noData.strength, 0);
+  assert.equal(noData.coverage.available, 0);
+  assert.equal(noData.coverage.total, 16);
+
+  // Every measurable component points the same way, so the strength saturates
+  // even though the raw score is far from the theoretical maximum.
+  const allBullish = evaluateDotSignal({
+    ...neutralInput,
+    above20w: true,
+    btcRegime: 1,
+    macdHistogram: 1,
+    networkHealthy: true,
+    trendState: 1,
+  });
+  assert.equal(allBullish.score, 48);
+  assert.equal(allBullish.coverage.available, 5);
+  assert.equal(allBullish.scoreRange.positive, 48);
+  assert.equal(allBullish.strength, 100);
+
+  // Mixed evidence lands between the bounds.
+  const mixed = evaluateDotSignal({
+    ...neutralInput,
+    above20w: true,
+    btcRegime: -1,
+    macdHistogram: 1,
+    trendState: 1,
+  });
+  assert.equal(mixed.score, 26);
+  assert.equal(mixed.scoreRange.positive, 46);
+  assert.equal(mixed.strength, Math.round((26 / 46) * 100));
+});
+
+test("strength stays within bounds when every component is at its extreme", () => {
+  const maxed = evaluateDotSignal({
+    activeValidators: 600,
+    adx: 30,
+    above20w: true,
+    atrPercent: 3,
+    bollingerPosition: 1.2,
+    btcRegime: 1,
+    change24h: 12,
+    change7d: 10,
+    developmentIndex: 90,
+    dotBtcChange7d: 10,
+    etfDayChange: 1,
+    etfPremiumDiscount: -2,
+    etfSharesChange5d: 2,
+    etfVolumeRatio: 3,
+    fundingRatePercent: -0.06,
+    longShortRatio: 0.5,
+    macdHistogram: 1,
+    networkHealthy: true,
+    newsBalance: 5,
+    openInterestChange24h: 10,
+    priceUp: true,
+    rsi: 25,
+    stakedPercent: 50,
+    trendState: 1,
+    volumeRatio: 2,
+  });
+  assert.equal(maxed.coverage.available, 16);
+  assert.equal(maxed.strength, 100);
 });

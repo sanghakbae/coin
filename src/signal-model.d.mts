@@ -3,14 +3,14 @@ export type SignalDirection = "buy" | "risk" | "neutral";
 export interface DotSignalInput {
   assetSymbol?: string;
   rsi: number | null;
-  trendState: -1 | 0 | 1;
+  trendState: -1 | 0 | 1 | null;
   above20w: boolean | null;
   macdHistogram: number | null;
   volumeRatio: number | null;
   priceUp: boolean;
   change24h: number | null;
   change7d: number | null;
-  newsBalance: number;
+  newsBalance: number | null;
   developmentIndex: number;
   networkHealthy: boolean | null;
   btcRegime: -1 | 0 | 1;
@@ -32,10 +32,13 @@ export interface DotSignalInput {
 export interface DotSignalResult {
   components: Record<string, number>;
   confidence: number;
+  coverage: { available: number; total: number };
   direction: SignalDirection;
   reasons: string[];
   riskLevel: "low" | "medium" | "high" | "unknown";
   score: number;
+  scoreRange: { positive: number; negative: number };
+  strength: number;
 }
 
 export function developmentContribution(index: number): number;

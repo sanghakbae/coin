@@ -655,7 +655,7 @@ async function fetchAssetContext(asset) {
     return date && now - new Date(date).getTime() <= 30 * 86_400_000;
   }).length;
   const developmentIndex = calculateDevelopmentIndex(repoResults, repos.length);
-  return { articleCount: articles.length, newsBalance: newsScoreRaw, newsScore, activeRepoCount, developmentIndex };
+  return { articleCount: articles.length, newsBalance: articles.length ? newsScoreRaw : null, newsScore, activeRepoCount, developmentIndex };
 }
 
 async function fetchGitHubAtomCommits(repoInfo) {
@@ -749,7 +749,7 @@ function calculateSignal(coin, timeframe, candles, ticker24h, context, macro, de
   const volumeRatio = ratioToAverage(volumes.at(-1) ?? 0, volumes.slice(-21, -1));
   const dayChangePercent = Number.isFinite(ticker24h.changePercent) ? ticker24h.changePercent : null;
   const change7d = calculatePeriodChange(closes, 7);
-  const trendState = ema50 !== null && ema200 !== null && price > ema50 && ema50 > ema200 ? 1 : ema50 !== null && ema200 !== null && price < ema50 && ema50 < ema200 ? -1 : 0;
+  const trendState = ema50 === null || ema200 === null ? null : price > ema50 && ema50 > ema200 ? 1 : price < ema50 && ema50 < ema200 ? -1 : 0;
   const btcRegime = macro?.btcEma200 ? (macro.btcPrice >= macro.btcEma200 ? 1 : -1) : 0;
   const result = evaluateDotSignal({
     assetSymbol: coin.symbol,
@@ -790,6 +790,8 @@ function calculateSignal(coin, timeframe, candles, ticker24h, context, macro, de
     timeframe,
     direction,
     score: result.score,
+    strength: result.strength,
+    coverage: result.coverage,
     confidence: result.confidence,
     riskLevel: result.riskLevel,
     reason: result.reasons.slice(0, 6).join(" · "),
