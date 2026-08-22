@@ -458,20 +458,6 @@ function rollingSma(values: number[], period: number) {
   });
 }
 
-// Steps a coarser series (e.g. weekly averages) onto a finer x-axis by holding
-// the last value that was already known at each target timestamp.
-function sampleSeries(series: Array<{ time: number; value: number }>, targets: number[]) {
-  let cursor = 0;
-  let held: number | null = null;
-  return targets.map((target) => {
-    while (cursor < series.length && series[cursor].time <= target) {
-      held = series[cursor].value;
-      cursor += 1;
-    }
-    return held;
-  });
-}
-
 // Draws a series that may have gaps: each run of known values becomes its own
 // subpath so a missing stretch leaves a break instead of a straight shortcut.
 function seriesPath(values: Array<number | null>, min: number, max: number, width: number, height: number, padding: number) {
@@ -535,6 +521,13 @@ function hourMarkers(times: number[], width: number, padding: number) {
       return { x: padding + (index / (times.length - 1)) * usableWidth, label: `${date.getHours()}시` };
     })
     .filter((marker): marker is { x: number; label: string } => marker !== null);
+}
+
+// 축 오른쪽 끝은 '오늘'/'지금' 배지가 차지한다. 그 자리에 걸리는 라벨은
+// 배지와 겹치고 좁은 화면에서는 캔버스 밖으로 밀려나므로 라벨만 지운다.
+// (세로 구분선은 그대로 남는다.)
+function dropEdgeLabels(markers: Array<{ x: number; label: string }>, width: number) {
+  return markers.filter((marker) => marker.x <= width * 0.815);
 }
 
 function dayMarkers(times: number[], width: number, padding: number, step: number) {
@@ -1660,6 +1653,11 @@ function guideFor(key: string) {
 
 function MetricGuideModal({ guideKey, onClose }: { guideKey: string; onClose: () => void }) {
   const guide = guideFor(guideKey);
+  const closeRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    closeRef.current?.focus();
+  }, [guideKey]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1682,7 +1680,7 @@ function MetricGuideModal({ guideKey, onClose }: { guideKey: string; onClose: ()
       >
         <div className="guideHeader">
           <strong>{guide.title}</strong>
-          <button type="button" aria-label="설명 닫기" onClick={onClose}>
+          <button type="button" aria-label="설명 닫기" onClick={onClose} ref={closeRef}>
             <X size={16} />
           </button>
         </div>
@@ -1745,6 +1743,7 @@ function DotChart({
       : rangeDays(range) <= 30
         ? dayMarkers(times, width, padding, rangeDays(range) <= 7 ? 1 : 5)
         : monthMarkers(times, width, padding);
+  const axisLabels = dropEdgeLabels(markers, width);
   const weeklyMarkers = granularity === "daily" && rangeDays(range) <= 180 ? weekMarkers(times, width, padding) : [];
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const selectedCandle = selectedIndex !== null ? visibleCandles[selectedIndex] ?? null : null;
@@ -1774,6 +1773,8 @@ function DotChart({
   // 지표 카드와 같은 정의(일봉 140개 평균)를 표기해 두 값이 어긋나지 않게 한다.
   const sma20wLatest = dailySma20wSeries[dailySma20wSeries.length - 1]?.value ?? lastValue(sma20w.settled) ?? lastValue(sma20w.partial);
   const sma200wLatest = lastValue(sma200w.settled) ?? lastValue(sma200w.partial);
+  // 아직 200주가 안 쌓인 자산은 표시값 자체가 누적 평균이다.
+  const sma200wSettled = lastValue(sma200w.settled) !== null;
   const withinScale = (value: number | null) => value !== null && min !== null && max !== null && value >= min && value <= max;
   // 이동평균은 기간만큼 데이터가 쌓인 뒤부터 존재한다. 왼쪽이 빈 게 렌더링
   // 누락처럼 보이지 않도록 시작 시점을 범례에 적는다.
@@ -1819,7 +1820,7 @@ function DotChart({
         <span className="legendSma200">
           200주선 {formatUsdt(sma200wLatest)}
           {sma200wLatest !== null && !withinScale(sma200wLatest) ? " · 차트 범위 밖" : ""}
-          {seriesStartLabel(sma200w.settled, "200주")}
+          {sma200wSettled ? seriesStartLabel(sma200w.settled, "200주") : " · 200주 미달 누적 평균"}
         </span>
       </div>
       <div className="chartCanvas">
@@ -1871,8 +1872,8 @@ function DotChart({
             </>
           )}
         </svg>
-        <div className={`chartMonthAxis ${markers.length > 6 ? "dense" : ""}`} aria-hidden="true">
-          {markers.map((marker) => (
+        <div className={`chartMonthAxis ${axisLabels.length > 6 ? "dense" : ""}`} aria-hidden="true">
+          {axisLabels.map((marker) => (
             <span key={`${marker.label}-axis-${marker.x}`} style={{ left: `${(marker.x / width) * 100}%` }}>
               {marker.label}
             </span>
