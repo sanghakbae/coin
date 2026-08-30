@@ -1,0 +1,89 @@
+/* 홈 화면 앱에서만 보이는 안내 두 가지(새 버전·iOS 설치)의 스타일.
+   기존 화면 위에 겹쳐 뜨므로 설명 모달(z-index 20)보다 위에 둔다. */
+.pwaBanner {
+  position: fixed;
+  right: 12px;
+  bottom: calc(12px + env(safe-area-inset-bottom));
+  left: 12px;
+  z-index: 30;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 14px;
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 13px 15px;
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  border-radius: 12px;
+  background: #0b111a;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55);
+}
+
+.pwaBanner > div:first-child {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  flex: 1 1 240px;
+}
+
+.pwaBanner strong {
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.pwaBanner small {
+  color: #9fb0c5;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.55;
+}
+
+.pwaBanner small b {
+  color: #d6dfeb;
+  font-weight: 900;
+}
+
+.pwaActions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+.pwaActions button {
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 9px;
+  color: #d6dfeb;
+  background: rgba(9, 14, 22, 0.86);
+  font-size: 13px;
+  font-weight: 800;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.pwaActions button:hover {
+  border-color: rgba(148, 163, 184, 0.5);
+  color: #ffffff;
+}
+
+.pwaActions .pwaPrimary {
+  border-color: rgba(54, 231, 184, 0.5);
+  color: #05080d;
+  background: #36e7b8;
+}
+
+.pwaActions .pwaPrimary:hover {
+  background: #55f2c9;
+}
+
+.pwaActions button:focus-visible {
+  outline: 2px solid #36e7b8;
+  outline-offset: 2px;
+}
+
+.pwaInstall {
+  border-color: rgba(54, 231, 184, 0.3);
+}

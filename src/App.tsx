@@ -2114,7 +2114,7 @@ export default function App() {
         {assessmentReady && (
           <button className="decisionScore" type="button" onClick={() => setGuideKey("strength")}>
             <strong>{indicator.signal.strength > 0 ? `+${indicator.signal.strength}` : indicator.signal.strength}</strong>
-            <small>신호 강도 (-100~100)</small>
+            <small>신호 강도</small>
             <small>원점수 {indicator.signal.score} · 지표 {indicator.signal.coverage.available}/{indicator.signal.coverage.total}</small>
             <small>신뢰도 {indicator.signal.confidence}%</small>
           </button>

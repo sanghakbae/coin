@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="코인거래추천">
+  <!-- 모든 아이콘(192·512·180·파비콘)의 단 하나뿐인 원본이다.
+       색이나 모양을 바꾸려면 이 파일만 고치고 `npm run icons`를 다시 돌린다.
+       추세선은 안쪽 50% 안에 그려서 안드로이드 마스크형 아이콘에서도 잘리지 않는다. -->
+  <style>
+    .bg { fill: #36e7b8; }
+    .mark {
+      fill: none;
+      stroke: #05080d;
+      stroke-width: 26;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+  </style>
+  <rect class="bg" width="512" height="512" rx="112" />
+  <path class="mark" d="M149 309 L 219 240 L 272 293 L 363 203" />
+  <path class="mark" d="M299 203 L 363 203 L 363 267" />
+</svg>

@@ -85,6 +85,44 @@ VITE_FIREBASE_MEASUREMENT_ID
 
 GitHub Actions는 `main` 브랜치 push 또는 수동 실행으로 GitHub Pages를 배포합니다. 자동 카카오 알림은 `.github/workflows/scheduled-alerts.yml`이 10분마다 별도로 실행합니다.
 
+## 홈 화면 앱(PWA)
+
+같은 사이트를 스토어 등록 없이 홈 화면에 설치해 쓸 수 있습니다. 별도 화면이 아니라
+지금 사이트를 그대로 감싼 것이라, 웹으로 열든 앱으로 열든 같은 코드가 돕니다.
+
+- `public/manifest.webmanifest` — 앱 이름(코인거래추천), 테마색, 아이콘, 주소창 없는 실행(`standalone`)
+- `scripts/sw-template.js` — 서비스워커 원본. 빌드할 때 `scripts/build-sw.mjs`가
+  `dist/` 목록과 내용 해시를 채워 `dist/sw.js`를 만든다
+- `src/pwa.tsx` — 서비스워커 등록, 새 버전 안내, iOS 설치 안내
+
+### 아이콘 다시 만들기
+
+모든 아이콘은 `assets/icon.svg` 하나에서 나옵니다. 색이나 모양을 바꾸려면 그 파일만
+고치고 아래를 실행하면 192·512·180·파비콘이 전부 따라옵니다. 결과물은 `public/`에
+커밋되어 있어 배포 빌드에는 변환기가 필요 없습니다.
+
+```bash
+npm run icons
+```
+
+`rsvg-convert`(brew install librsvg) 또는 ImageMagick 중 하나가 있으면 됩니다.
+색을 바꿨다면 `manifest.webmanifest`와 `index.html`의 `theme-color`도 함께 확인하세요.
+
+### 새 버전 배포
+
+새 버전은 자동으로 적용되지 않습니다. 서비스워커가 대기 상태로 들어가고 화면에
+안내가 뜨며, 사용자가 "새로고침"을 눌러야 교체됩니다. 작성 중이던 입력을 지키기
+위한 것이므로 자동 새로고침으로 바꾸지 마세요.
+
+### 손대면 안 되는 것
+
+- 입력칸 글자 크기는 16px 미만으로 내리지 않습니다. iOS가 포커스 시 화면을 확대해
+  오른쪽이 잘립니다. 값은 `--input-font-size` 한 곳에서만 정하고
+  `tests/mobile-input-zoom.test.mjs`가 이를 막습니다.
+- 확대를 막는 `user-scalable=no`는 쓰지 않습니다. 확대해서 보는 사용자를 막습니다.
+- 서비스워커의 `caches.match`에는 `ignoreVary: true`가 필요합니다. 호스팅이
+  `Vary: Origin`을 붙이면 캐시가 통째로 빗나가 오프라인에서 흰 화면이 뜹니다.
+
 ## Custom domain
 
 현재 프론트는 GitHub Pages에서 `dot.sanghak.kr`로 배포합니다. `public/CNAME`에 커스텀 도메인이 들어 있으며, GitHub Pages 설정에서 Source는 GitHub Actions입니다.

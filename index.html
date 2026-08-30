@@ -2,7 +2,21 @@
 <html lang="ko">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- user-scalable=no는 쓰지 않는다. 확대해서 보는 사용자를 막는다.
+         viewport-fit=cover는 홈 화면 앱에서 노치 영역까지 배경을 채우기 위한 것이고,
+         내용은 App.css의 safe-area 여백으로 밀어 둔다. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#05080d" />
+    <meta name="description" content="비트코인·이더리움 등 주요 코인의 매수·매도 신호를 한 화면에서 봅니다." />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
+    <link rel="icon" href="/favicon-96.png" sizes="96x96" type="image/png" />
+    <!-- iOS는 매니페스트의 이름·아이콘을 읽지 않으므로 따로 지정한다. -->
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="코인거래추천" />
     <title>Dot Signal Alert</title>
   </head>
   <body>

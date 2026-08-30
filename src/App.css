@@ -31,6 +31,22 @@ a {
   font: inherit;
 }
 
+/* iOS는 16px 미만인 입력칸에 포커스가 가면 화면 전체를 확대한다. 확대된 화면은
+   오른쪽이 잘려 되돌리기 어렵다. 모바일 글자 크기를 줄일 때 입력칸이 딸려
+   내려가는 사고가 반복돼, 입력칸 값은 여기 한 곳에서만 정하고
+   tests/mobile-input-zoom.test.mjs가 16px 아래로 내려가는 것을 막는다.
+   확대 자체를 막는 user-scalable=no는 쓰지 않는다. */
+:root {
+  --input-font-size: 16px;
+}
+
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: var(--input-font-size);
+}
+
 button {
   cursor: pointer;
 }
@@ -42,6 +58,12 @@ button {
   min-width: 0;
   max-width: 100%;
   padding: 18px;
+  /* 주소창 없이 열리는 홈 화면 앱에서 노치·홈 인디케이터에 가리지 않게 한다.
+     브라우저에서는 env() 값이 0이라 기존 여백 그대로다. */
+  padding-top: max(18px, env(safe-area-inset-top));
+  padding-right: max(18px, env(safe-area-inset-right));
+  padding-bottom: max(18px, env(safe-area-inset-bottom));
+  padding-left: max(18px, env(safe-area-inset-left));
 }
 
 .heroPanel,
